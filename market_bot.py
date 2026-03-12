@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 import traceback
+from requests.exceptions import HTTPError
 from incentive import INCENTIVE_PROGRAM
 from trade import TRADE
 from clients import KalshiHttpClient, Environment
@@ -10,19 +11,17 @@ from dotenv import load_dotenv
 from cryptography.hazmat.primitives import serialization
 from datetime import datetime, timedelta
 
-TRADE_SIZE = 1
-WAIT_TIME = 600
-EXPIRATION_TS = 600
+TRADE_SIZE = 300
+WAIT_TIME = 0
+EXPIRATION_TS = 30
 
 TRADE_PRICE_RANGE = [0.05, 0.3]
 STOP_TRADE_TIME = 300
+OPEN_POSITIONS_MAX = 1
 
-CHECK_TIME = 3600
-OPEN_POSITIONS_MAX = 2
+MINIMUM_MARKET_PRICE_DELTA = 0.15
 
-MINIMUM_MARKET_PRICE_DELTA = 0.2
-
-LOG_FILE = "trade.log"
+LOG_FILE = "logs/trade.log"
 
 
 class MARKET_BOT:
@@ -49,10 +48,35 @@ class MARKET_BOT:
         """Print message to console and write to log file."""
         print(message)
         try:
+            log_dir = os.path.dirname(self.log_file)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
             with open(self.log_file, 'a') as f:
                 f.write(message + '\n')
         except Exception as e:
             print(f"Error writing to log file: {e}")
+
+    def _retry_on_timestamp_error(self, func, max_retries=3, retry_delay=1):
+        """Retry a function call if it fails with timestamp expiration error."""
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except HTTPError as e:
+                # Check if it's a timestamp expiration error
+                if e.response.status_code == 401:
+                    error_details = getattr(e.response, '_error_details', {})
+                    error_code = error_details.get('error', {}).get('code', '')
+                    if error_code == 'header_timestamp_expired' and attempt < max_retries - 1:
+                        self.log(f"{self.get_datetime()} [RETRY] Timestamp expired, retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                # If it's not a timestamp error or we've exhausted retries, raise
+                raise
+            except Exception as e:
+                # For other exceptions, raise immediately
+                raise
+        # Should never reach here, but just in case
+        raise Exception("Max retries exceeded")
 
     def start_trading(self):
         try:
@@ -192,12 +216,16 @@ class MARKET_BOT:
     def place_order(self, curr_traded_incentive: dict):
         trade_book_dict = {}
         for trade_ticker in curr_traded_incentive:
-            trade_book_dict[trade_ticker] = self.client.get_market_ticker_order_book(trade_ticker)['orderbook']
+            trade_book_dict[trade_ticker] = self._retry_on_timestamp_error(
+                lambda ticker=trade_ticker: self.client.get_market_ticker_order_book(ticker)['orderbook']
+            )
 
         self.trade.prepare_open_order(curr_traded_incentive, trade_book_dict)
 
         if self.trade.has_open_position():
-            self.trade.balance = self.client.get_balance()['balance']
+            self.trade.balance = self._retry_on_timestamp_error(
+                lambda: self.client.get_balance()['balance']
+            )
             market_orders = self.trade.create_open_order()
             for order in market_orders:
                 try:
@@ -218,9 +246,9 @@ class MARKET_BOT:
                     no_price = order.get('no_price', 0)
 
                     self.log(f"{self.get_datetime()} [OPEN ORDER] Ticker: {ticker} | Title: {title} | Rules Primary: {rules_primary}")
-                    self.log(f"  └─ Side: {side} | Action: {action} | Count: {count} | Type: {order_type} | Price: {price}")
-                    self.log(f"  └─ Market Yes Price: ${order['market_yes_price']:.4f} | Market No Price: ${order['market_no_price']:.4f}")
-                    self.log(f"  └─ Market Book: Yes Qty: {yes_qty} | No Qty: {no_qty} | Yes Price: ${yes_price:.4f} | No Price: ${no_price:.4f}")
+                    self.log(f"  └─ {action}: {side} {count} {order_type} {price}")
+                    self.log(f"  └─ Yes Order Book: {order['yes_order_book']}")
+                    self.log(f"  └─ No Order Book: {order['no_order_book']}")
                     
                     # Extract price values for API call
                     yes_price_dollars = order.get('yes_price_dollars', None)
@@ -237,7 +265,8 @@ class MARKET_BOT:
                         type=order['type'],
                         yes_price_dollars=yes_price_dollars,
                         no_price_dollars=no_price_dollars,
-                        expiration_ts=order['expiration_ts'],
+                        # expiration_ts=order['expiration_ts'],
+                        time_in_force=order['time_in_force'],
                     )
                     
                     # Format response
@@ -267,6 +296,8 @@ class MARKET_BOT:
                     # Log order details for debugging
                     self.log(f"{self.get_datetime()} [ERROR] Order details: Ticker={ticker}, Side={side}, Action={action}, Count={count}, Type={order_type}, Price={price}")
                     self.log(f"{self.get_datetime()} [ERROR] Traceback: {traceback.format_exc()}")
+        else:
+            self.log(f"{self.get_datetime()} [NO OPEN POSITIONS] No open positions")
 
     def run(self):
         """Main trading loop with error handling - keeps running even if errors occur."""

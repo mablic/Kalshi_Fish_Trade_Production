@@ -97,9 +97,40 @@ class KalshiHttpClient(KalshiBaseClient):
         self.markets_url = "/trade-api/v2/markets"
         self.portfolio_url = "/trade-api/v2/portfolio"
 
-    def get_positions(self) -> Dict[str, Any]:
-        """Retrieves the account positions."""
-        return self.get(self.portfolio_url + '/positions')
+    def get_positions(
+        self,
+        count_filter: Optional[str] = "position",
+        limit: Optional[int] = 1000,
+        cursor: Optional[str] = None,
+        fetch_all: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Retrieves account positions. Default count_filter='position' returns only
+        positions with non-zero position_fp. API defaults to 100 per page (max 1000).
+        If fetch_all is True, paginates until no cursor.
+        See https://docs.kalshi.com/api-reference/portfolio/get-positions
+        """
+        all_market = []
+        all_event = []
+        next_cursor = cursor
+        page_limit = min(1000, limit) if limit else 1000
+        while True:
+            params = {"limit": page_limit}
+            if count_filter is not None:
+                params["count_filter"] = count_filter
+            if next_cursor:
+                params["cursor"] = next_cursor
+            resp = self.get(self.portfolio_url + '/positions', params=params)
+            all_market.extend(resp.get("market_positions") or [])
+            all_event.extend(resp.get("event_positions") or [])
+            next_cursor = resp.get("cursor")
+            if not fetch_all or not next_cursor:
+                break
+        return {
+            "market_positions": all_market,
+            "event_positions": all_event,
+            "cursor": next_cursor,
+        }
 
     def get_fills(self) -> Dict[str, Any]:
         """Retrieves the account fills."""
@@ -195,6 +226,9 @@ class KalshiHttpClient(KalshiBaseClient):
         params = {k: v for k, v in params.items() if v is not None}
         return self.get(self.markets_url + '/trades', params=params)
 
+    def get_fills(self, min_ts: Optional[int] = None):
+        """Retrieves the fills."""
+        return self.get(self.portfolio_url + '/fills?min_ts=' + str(min_ts))
 
     def get_market_incentive(self):
         """Retrieves market data for a given market ID."""
@@ -205,15 +239,59 @@ class KalshiHttpClient(KalshiBaseClient):
         """Retrieves tickers for all markets."""
         return self.get(self.markets_url + '/' + ticker)
 
+    def get_markets_by_series(self, series_ticker: Optional[str] = None, status: Optional[str] = None, limit: int = 1000):
+        """
+        Get markets by series_ticker from Kalshi API.
+        
+        Args:
+            series_ticker: The series ticker to search for (e.g., "KXLOWTCHI-26JAN30")
+            status: Filter by status (e.g., "open", "closed"). If None, returns all statuses.
+            limit: Maximum number of results to return (default: 1000)
+        
+        Returns:
+            Dictionary with 'markets' list containing market data
+        """
+        params = {"limit": limit}
+        if series_ticker:
+            params["series_ticker"] = series_ticker.upper()
+        if status:
+            params["status"] = status
+        
+        return self.get(self.markets_url, params=params)
 
     def get_market_ticker_order_book(self, ticker: Optional[str] = None):
         """Retrieves order book for a given market."""
         return self.get(self.markets_url + '/' + ticker + '/orderbook')
 
 
-    def get_open_orders(self) -> Dict[str, Any]:
-        """Retrieves the open orders."""
-        return self.get(self.portfolio_url + '/orders')
+    def get_open_orders(
+        self,
+        status: Optional[str] = "resting",
+        limit: Optional[int] = 200,
+        cursor: Optional[str] = None,
+        fetch_all: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Retrieves orders. Default status='resting' returns only open (resting) orders.
+        API defaults to 100 per page (max 200). If fetch_all is True, paginates until no cursor.
+        See https://docs.kalshi.com/api-reference/orders/get-orders
+        """
+        all_orders = []
+        next_cursor = cursor
+        page_limit = min(200, limit) if limit else 200
+        while True:
+            params = {"limit": page_limit}
+            if status is not None:
+                params["status"] = status
+            if next_cursor:
+                params["cursor"] = next_cursor
+            resp = self.get(self.portfolio_url + '/orders', params=params)
+            orders = resp.get("orders") or []
+            all_orders.extend(orders)
+            next_cursor = resp.get("cursor")
+            if not fetch_all or not next_cursor or (limit and len(all_orders) >= limit):
+                break
+        return {"orders": all_orders, "cursor": next_cursor}
 
     def create_open_order(self, 
           ticker: Optional[str] = None, 
@@ -224,9 +302,14 @@ class KalshiHttpClient(KalshiBaseClient):
           yes_price_dollars: Optional[str] = None,  
           no_price_dollars: Optional[str] = None,  
           time_in_force: Optional[str] = None,
-          expiration_ts: Optional[int] = None,
+          reduce_only: Optional[bool] = None,
+        #   expiration_ts: Optional[int] = None,
+        #   status: Optional[str] = None,
         ):
-        """Creates an open order for a given market."""
+        """Creates an open order for a given market. reduce_only=True prevents selling more than position (no short)."""
+        # NEVER allow sell NO - would create short position
+        if action == "sell" and side == "no":
+            raise ValueError("BLOCKED: sell side=no would create short position. Only sell YES.")
         playload = {
             "ticker": ticker, 
             "side": side,    
@@ -236,7 +319,9 @@ class KalshiHttpClient(KalshiBaseClient):
             "yes_price_dollars": yes_price_dollars,  
             "no_price_dollars": no_price_dollars,
             "time_in_force": time_in_force,
-            "expiration_ts": expiration_ts 
+            "status": "resting",
+            "reduce_only": reduce_only,
+            # "expiration_ts": expiration_ts
         }
         # Remove None values to avoid API errors
         playload = {k: v for k, v in playload.items() if v is not None}
@@ -273,10 +358,6 @@ class KalshiHttpClient(KalshiBaseClient):
     def cancel_open_order(self, order_id: Optional[str] = None):
         """Cancels an open order for a given market."""
         return self.delete(self.portfolio_url + '/orders/' + order_id)
-
-
-
-
 
 
 class KalshiWebSocketClient(KalshiBaseClient):

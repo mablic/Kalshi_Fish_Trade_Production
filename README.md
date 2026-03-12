@@ -17,7 +17,7 @@ This bot automates the process of:
 - **Position Management**: Closes open positions and cancels existing orders before new trading sessions
 - **Incentive Tracking**: Monitors and tracks incentive programs, updating trading strategies accordingly
 - **Error Handling**: Robust error handling with automatic retry on transient failures
-- **Comprehensive Logging**: Detailed logs of all trading activities written to `trade.log`
+- **Comprehensive Logging**: Detailed logs of all trading activities written to `logs/trade.log`
 - **Dual Environment Support**: Works with both DEMO and PROD environments
 
 ## Requirements
@@ -87,13 +87,21 @@ env = Environment.PROD  # Use Environment.DEMO for testing
 
 ## Usage
 
-### Running the Bot
+### Running the Market-Making Bot
 
 ```bash
 python market_bot.py
 ```
 
-The bot will:
+### Running the Fish Trade (Temperature) Bot
+
+```bash
+python fish_trade.py
+```
+
+Uses NWS weather to trade Kalshi temperature markets (see [Fish Trade](#fish-trade-fish_tradepy) below). Set `PROD_KEYID`/`PROD_KEYFILE` (or `DEMO_*`) in `.env`.
+
+**Market-making bot** (market_bot.py) will:
 
 1. Cancel any existing open orders
 2. Close any open positions
@@ -109,14 +117,27 @@ Press `Ctrl+C` to stop the bot gracefully. The bot will log a shutdown message a
 
 ```
 KalshiModel/
-├── market_bot.py      # Main bot logic and trading loop
-├── clients.py         # Kalshi API client implementation
-├── incentive.py       # Incentive program tracking and management
-├── trade.py           # Order creation and trading logic
-├── main.py            # Alternative entry point (if used)
-├── requirements.txt   # Python dependencies
-├── trade.log          # Trading activity logs (auto-generated)
-└── .env               # Environment variables (not in repo)
+├── market_bot.py        # Main market-making bot and trading loop
+├── fish_trade.py        # Temperature (weather) trading bot — see Fish Trade below
+├── clients.py           # Kalshi API client implementation
+├── incentive.py         # Incentive program tracking and management
+├── trade.py             # Order creation and trading logic (market bot)
+├── fish_orders.py       # Fish trade order/position state and PnL
+├── fish_parse_weather.py # NWS weather parsing (report, forecast, historical)
+├── fish_market_ticker.py # Kalshi temp ticker selection (3–4 per city/date)
+├── fish_trade_time.py   # Trade windows (today/tomorrow high/low)
+├── fish_price_strategy.py # Buy/sell price logic for fish markets
+├── fish_incentive.py    # Fish incentive (if used)
+├── main.py              # Alternative entry point (if used)
+├── requirements.txt     # Python dependencies
+├── scripts/             # Analysis and backtest scripts
+│   ├── analyze_pnl.py   # PnL from API or CSV
+│   └── weather_winner_past_7days.py # Weather vs Kalshi outcome backtest
+├── logs/                 # Log files (auto-generated)
+│   ├── trade.log        # Market bot logs
+│   ├── fish_trade.log   # Fish trade logs
+│   └── fish_pnl.csv     # Fish PnL log
+└── .env                  # Environment variables (not in repo)
 ```
 
 ## Key Components
@@ -151,15 +172,59 @@ Manages incentive program tracking:
 
 ### TRADE (`trade.py`)
 
-Order creation logic:
+Order creation logic for the market bot:
 
 - Calculates order prices based on order book
 - Creates limit orders with proper pricing
 - Manages trade size and balance
 
+---
+
+## Fish Trade (`fish_trade.py`)
+
+A separate automated strategy that trades Kalshi **temperature (weather) markets** using NWS weather data. It buys YES on a small set of temperature tickers around the predicted high/low for each city and date, then places resting sell orders to close positions.
+
+### What it does
+
+- **Weather input**: Uses `fish_parse_weather` to get min/max forecasts and historical data from NWS (daily report, DWML forecast, obhistory) per city in `site_dict`.
+- **Ticker selection**: For each city and date (today/tomorrow), `fish_market_ticker` picks **3–4** temperature tickers: the 3 closest to the predicted high (or low), plus optionally a 4th by highest order-book volume within ±2° of the target.
+- **Buy orders**: At configured start times (today high, tomorrow low, tomorrow high), places limit **buy YES** orders on those tickers (one order per ticker, size `TRADE_SIZE`).
+- **Sell orders**: When buys fill, it creates **sell YES** (limit) orders to close. Sell quantity is **capped to actual position** from `get_positions()` so it never oversells (no short YES / NO position). Sell prices can be updated in stages via `fish_price_strategy` as market close approaches.
+- **Oversell check**: `check_over_sell()` compares resting sell order size to current position; if a sell order is larger than position, it cancels and replaces with a sell sized to position.
+- **State**: Open buy/sell orders and filled positions are tracked in `fish_orders` (FISH_ORDERS_MANAGER), with state and PnL written to `logs/` (e.g. `fish_pnl.csv`).
+
+### Running the Fish Trade bot
+
+```bash
+python fish_trade.py
+```
+
+- Requires `.env` with `PROD_KEYID` / `PROD_KEYFILE` (or `DEMO_*`). Toggle environment at the bottom of `fish_trade.py`: `env = Environment.PROD` or `Environment.DEMO`.
+- Main loop: every cycle it syncs open orders and fills, cancels/updates as needed, creates/updates sell orders (capped to position), then creates buy orders at the appropriate time windows. It then waits **30 minutes** before the next cycle.
+
+### Key parameters
+
+- **`TRADE_SIZE`** (default 100): Contracts per buy order per ticker.
+- **`site_dict`**: City code → list of 3 NWS URLs (daily report, forecast DWML, timeseries/obhistory). Defines which cities are traded (e.g. PHIL, CHI, AUS, LAX, DEN, TOKC, TMIN, TATL, TNOLA, TPHX, TSATX, TDAL, TSFO, TSEA, THOU, TBOS).
+
+### Related modules
+
+- **`fish_parse_weather`**: FISH_PARSE_WEATHER — NWS report/forecast/historical by city.
+- **`fish_market_ticker`**: FISH_MARKET_TICKER — get_tickers_for_date() returns 3–4 tickers per city/date/type (low/high).
+- **`fish_orders`**: FISH_ORDERS, FISH_ORDERS_MANAGER — in-memory state, state file, PnL CSV.
+- **`fish_trade_time`**: FISH_TRADE_TIME — today/tomorrow dates and time windows for when to start/stop each trade type.
+- **`fish_price_strategy`**: FISH_PRICE_STRATEGY — buy and sell price from order book.
+
+### Logging
+
+- **`logs/fish_trade.log`**: All actions (create/cancel/update orders, over-sell fixes, errors). Path is resolved from the script directory so it works regardless of cwd.
+- **`logs/fish_pnl.csv`**: PnL entries (e.g. expired unfilled sells).
+
+---
+
 ## Logging
 
-All trading activities are logged to `trade.log` with timestamps. Log entries include:
+All trading activities are logged to `logs/trade.log` with timestamps. Log entries include:
 
 - **Order Operations**: Cancel, open, and close orders with details
 - **Position Management**: Open positions, closing positions
@@ -191,13 +256,13 @@ The bot includes comprehensive error handling:
 
 - This bot trades real money when using PROD environment
 - Always test thoroughly in DEMO environment first
-- Monitor `trade.log` regularly for errors
+- Monitor `logs/trade.log` regularly for errors
 - Ensure sufficient account balance for trading
 
 📝 **Best Practices**:
 
 - Start with `WAIT_TIME=60` or higher to avoid rate limiting
-- Monitor `trade.log` for the first few hours of operation
+- Monitor `logs/trade.log` for the first few hours of operation
 - Keep API keys secure and never commit them to version control
 - Use `.env` file for credentials (already in `.gitignore`)
 

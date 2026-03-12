@@ -94,8 +94,8 @@ class TRADE:
                 no_price = float(no_book[no_idx][0])
                 no_qty = float(no_book[no_idx][1])
                 price = min(yes_price, no_price)
-                market_yes_price_delta = float(market_yes_price) - float(yes_price)
-                market_no_price_delta = float(market_no_price) - float(no_price)
+                market_yes_price_delta = abs(float(market_yes_price) - float(yes_price))
+                market_no_price_delta = abs(float(market_no_price) - float(no_price))
 
                 if yes_qty > order_book[ticker]['target_size'] and no_qty > order_book[ticker]['target_size']:
                     continue
@@ -128,6 +128,8 @@ class TRADE:
                     'market_no_price': market_no_price,
                     'market_yes_price_delta': market_yes_price_delta,
                     'market_no_price_delta': market_no_price_delta,
+                    'yes_order_book': yes_book,
+                    'no_order_book': no_book,
                 }
                 self.open_trade_orders[ticker] = order
         
@@ -162,7 +164,8 @@ class TRADE:
                     'side': order['side'],
                     'action': "buy",
                     'count': self.trade_size,
-                    'expiration_ts': expiration_ts,
+                    # 'expiration_ts': expiration_ts,
+                    'time_in_force': "good_till_canceled",
                     'type': "limit",
                     order['price_name']: f"{order['price']:.4f}",
                     'title': order['title'],
@@ -175,6 +178,8 @@ class TRADE:
                     'market_no_price': order['market_no_price'],
                     'market_yes_price_delta': order['market_yes_price_delta'],
                     'market_no_price_delta': order['market_no_price_delta'],
+                    'yes_order_book': order['yes_order_book'],
+                    'no_order_book': order['no_order_book'],
                 }
                 market_orders.append(tmp_market_order)
         

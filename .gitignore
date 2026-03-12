@@ -11,6 +11,13 @@ __pycache__
 *.pyzwz
 *.pyzwzw
 *.pyzwzwz
+fish_pnl.log
+fish_pnl.csv
+fish_open_trade_ticker.json
+fish_trade.log
+fish_tester.log
+logs/
+debug_sell_no.json
 
 PRIVATE_KEY.pem
 PUBLIC_KEY.pem
