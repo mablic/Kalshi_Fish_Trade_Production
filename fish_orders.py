@@ -273,7 +273,7 @@ class FISH_ORDERS_MANAGER:
         self.__FISH_ORDER_QUANTITY = value
 
     def add_open_order(self, order: FISH_ORDERS):
-        if order.trade_type != 'fish_order':
+        if order.trade_type != 'fish_order' and order.trade_type != 'incentive_trade':
             return
         if order.action == 'buy':
             if order.ticker in self.open_buy_orders:
@@ -350,10 +350,12 @@ class FISH_ORDERS_MANAGER:
         """Mark a ticker as having an executed sell order in API"""
         self.executed_sell_orders.add(ticker)
     
-    def create_fish_buy_order(self, ticker, price: float):
+    def create_fish_buy_order(self, ticker, price: float, quantity: int = None, remaining_quantity: int = None, trade_type: str = 'fish_order'):
         """
         Create a buy order for a ticker.
         """
+        qty = quantity if quantity is not None else self.__FISH_ORDER_QUANTITY
+        rem_qty = remaining_quantity if remaining_quantity is not None else self.__FISH_ORDER_QUANTITY
         ORDER = FISH_ORDERS(
             order_id = '',
             ticker = ticker,
@@ -363,13 +365,13 @@ class FISH_ORDERS_MANAGER:
             order_execution_type = 'new',
             action = 'buy',
             side = 'yes',
-            quantity = self.__FISH_ORDER_QUANTITY,
-            remaining_quantity = self.__FISH_ORDER_QUANTITY,
+            quantity = qty,
+            remaining_quantity = rem_qty,
             entry_price = price,
             price = price,
             created_at = datetime.now().isoformat(),
             last_updated_at = None,
-            trade_type = 'fish_order',
+            trade_type = trade_type,
         )
         self.add_open_order(ORDER)
 
@@ -403,63 +405,64 @@ class FISH_ORDERS_MANAGER:
             # If actual_positions provided, only create sells where we have position > 0
             if actual_positions is not None and actual_positions.get(ticker, 0) <= 0:
                 continue
-            if filled_order.action == 'buy' and filled_order.quantity > 0 and filled_order.trade_type == 'fish_order':
-                # Skip if this ticker has an executed sell order in API
-                # (it means the sell order was already executed, so we don't need to add it)
-                if ticker in self.executed_sell_orders:
-                    continue
-                
-                # Get open sell quantity for this ticker
-                open_sell_qty = 0
-                if ticker in self.open_sell_orders:
-                    open_sell_qty = self.open_sell_orders[ticker].remaining_quantity
-                
-                # Calculate net unmatched filled buys
-                # filled_order.quantity is already net (filled buys - filled sells from add_filled_order logic)
-                # net_unmatched = net_filled_position - open_sells
-                net_unmatched = filled_order.quantity - open_sell_qty
-                # Cap by actual position so we never place a sell for more than we have (prevents oversell
-                # when state is out of sync after e.g. cancel+replace failure or fill not yet in get_fills).
-                if actual_positions is not None:
-                    net_unmatched = min(net_unmatched, actual_positions.get(ticker, 0))
-                
-                if net_unmatched > 0:
-                    if ticker not in self.open_sell_orders:
-                        # Ticker doesn't exist in open_sell_orders, so this is a 'new' order to be created
-                        order_execution_type = 'new'
-                        
-                        # Create a new sell order. ALWAYS side='yes' - never sell NO (short).
-                        sell_order = FISH_ORDERS(
-                            order_id='',  # No order ID since it's not yet created
-                            ticker=ticker,
-                            symbol=filled_order.symbol,
-                            order_date=filled_order.order_date,
-                            order_type='open',
-                            order_execution_type=order_execution_type,
-                            action='sell',
-                            side='yes',
-                            quantity=net_unmatched,
-                            remaining_quantity=net_unmatched,
-                            price=round(2 * float(filled_order.price), 2), 
-                            created_at=datetime.now().isoformat(),
-                            last_updated_at=None,
-                            trade_type='fish_order',
-                            entry_price=filled_order.entry_price,
-                        )
-                        self.open_sell_orders[ticker] = sell_order
-                    else:
-                        # Ticker exists: API has resting sell. If API qty < position, cancel+replace with full qty.
-                        existing_order = self.open_sell_orders[ticker]
-                        api_resting_qty = existing_order.remaining_quantity  # synced from API in get_open_orders
-                        target_qty = filled_order.quantity
-                        if actual_positions is not None:
-                            target_qty = min(target_qty, actual_positions.get(ticker, 0))
-                        if api_resting_qty < target_qty and target_qty > 0:
-                            # Need more: cancel old order, place new for full position (capped by actual)
-                            existing_order.quantity = target_qty
-                            existing_order.remaining_quantity = target_qty
-                            existing_order.order_execution_type = 'update'
-                        # else: api_resting_qty >= position, nothing to do (or some filled - filled_order tracks that)
+            if filled_order.action == 'buy' and filled_order.quantity > 0:
+                if filled_order.trade_type == 'fish_order' or filled_order.trade_type == 'incentive_trade':
+                    # Skip if this ticker has an executed sell order in API
+                    # (it means the sell order was already executed, so we don't need to add it)
+                    if ticker in self.executed_sell_orders:
+                        continue
+                    
+                    # Get open sell quantity for this ticker
+                    open_sell_qty = 0
+                    if ticker in self.open_sell_orders:
+                        open_sell_qty = self.open_sell_orders[ticker].remaining_quantity
+                    
+                    # Calculate net unmatched filled buys
+                    # filled_order.quantity is already net (filled buys - filled sells from add_filled_order logic)
+                    # net_unmatched = net_filled_position - open_sells
+                    net_unmatched = filled_order.quantity - open_sell_qty
+                    # Cap by actual position so we never place a sell for more than we have (prevents oversell
+                    # when state is out of sync after e.g. cancel+replace failure or fill not yet in get_fills).
+                    if actual_positions is not None:
+                        net_unmatched = min(net_unmatched, actual_positions.get(ticker, 0))
+                    
+                    if net_unmatched > 0:
+                        if ticker not in self.open_sell_orders:
+                            # Ticker doesn't exist in open_sell_orders, so this is a 'new' order to be created
+                            order_execution_type = 'new'
+                            
+                            # Create a new sell order. ALWAYS side='yes' - never sell NO (short).
+                            sell_order = FISH_ORDERS(
+                                order_id='',  # No order ID since it's not yet created
+                                ticker=ticker,
+                                symbol=filled_order.symbol,
+                                order_date=filled_order.order_date,
+                                order_type='open',
+                                order_execution_type=order_execution_type,
+                                action='sell',
+                                side='yes',
+                                quantity=net_unmatched,
+                                remaining_quantity=net_unmatched,
+                                price=round(2 * float(filled_order.price), 2), 
+                                created_at=datetime.now().isoformat(),
+                                last_updated_at=None,
+                                trade_type=filled_order.trade_type,
+                                entry_price=filled_order.entry_price,
+                            )
+                            self.open_sell_orders[ticker] = sell_order
+                        else:
+                            # Ticker exists: API has resting sell. If API qty < position, cancel+replace with full qty.
+                            existing_order = self.open_sell_orders[ticker]
+                            api_resting_qty = existing_order.remaining_quantity  # synced from API in get_open_orders
+                            target_qty = filled_order.quantity
+                            if actual_positions is not None:
+                                target_qty = min(target_qty, actual_positions.get(ticker, 0))
+                            if api_resting_qty < target_qty and target_qty > 0:
+                                # Need more: cancel old order, place new for full position (capped by actual)
+                                existing_order.quantity = target_qty
+                                existing_order.remaining_quantity = target_qty
+                                existing_order.order_execution_type = 'update'
+                            # else: api_resting_qty >= position, nothing to do (or some filled - filled_order tracks that)
 
     def get_open_buy_orders(self):
         return self.open_buy_orders

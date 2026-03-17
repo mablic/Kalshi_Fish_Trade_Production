@@ -99,11 +99,12 @@ class FISH_PRICE_STRATEGY:
         entries = []
         for pe in yes_book:
             try:
-                p, v = float(pe[0]), int(pe[1])
+                p, v = float(pe[0]), float(pe[1])
                 if p > 1:
                     p = p / 100
                 entries.append((p, v))
             except (ValueError, TypeError, IndexError):
+                print(f"Error parsing price: {pe}")
                 continue
         if not entries:
             return None

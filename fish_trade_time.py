@@ -44,13 +44,17 @@ class FISH_TRADE_TIME:
     TODAY_LOW_STOP_HOUR = 5             # 5AM: cancel remaining unfilled buy orders
 
     # --- Next day: tmr high (bought yesterday, close 5-7AM) ---
-    TMR_LOW_CLOSE_HOURS = (7, 8, 9)
+    TMR_LOW_CLOSE_HOURS = (17, 18, 19)
     TMR_HIGH_CLOSE_HOURS = (21, 23, 50)
 
     # --- Next day: today high ---
     TODAY_HIGH_START_HOUR = 8
-    TODAY_HIGH_CLOSE_HOURS = (9, 10, 11)
+    TODAY_HIGH_CLOSE_HOURS = (10, 11, 12)
     TODAY_HIGH_STOP_HOUR = 9            # 9AM: cancel remaining unfilled buy orders
+
+    # --- Fish incentive ---
+    FISH_INCENTIVE_START_HOUR = 10
+    FISH_INCENTIVE_STOP_HOUR = 17
 
     # One-shot flags (reset when date rolls)
     __START_TODAY_LOW = False
@@ -174,6 +178,14 @@ class FISH_TRADE_TIME:
         if self._hour() in self.TODAY_HIGH_CLOSE_HOURS:
             return self.get_close_stage_for_today_high()
         return 0
+
+    def is_fish_incentive_start_trade_time(self) -> bool:
+        """10AM: start fish incentive program."""
+        return self._hour() >= self.FISH_INCENTIVE_START_HOUR and self._hour() < self.FISH_INCENTIVE_STOP_HOUR
+
+    def is_fish_incentive_stop_trade_time(self) -> bool:
+        """13PM: stop fish incentive program."""
+        return self._hour() >= self.FISH_INCENTIVE_STOP_HOUR
 
     # --- Legacy property names for fish_trade compatibility ---
     @property

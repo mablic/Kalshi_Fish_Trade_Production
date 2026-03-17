@@ -2,11 +2,13 @@
 """
 Analyze Kalshi trades and PnL.
   Option A: From API (GET /portfolio/fills and /settlements)
-  Option B: From Kalshi transactions CSV export (all amounts in CENTS).
-Run: python scripts/analyze_pnl.py                    # API, last 7 days
+  Option B: From Kalshi transactions CSV export (all amounts in CENTS)
+  Option C: From logs/fish_pnl.csv (internal fish_trade log - your actual trades)
+Run: python scripts/analyze_pnl.py                    # API, last 30 days
+     python scripts/analyze_pnl.py --fish-pnl          # From logs/fish_pnl.csv (past weeks)
      python scripts/analyze_pnl.py --month MAR        # API, March markets
      python scripts/analyze_pnl.py --csv path/to/Kalshi-Transactions-2026.csv  # CSV (cents)
-     python scripts/analyze_pnl.py --csv path/to/file.csv --month MAR
+     python scripts/analyze_pnl.py --fish-pnl --days 60  # fish_pnl, last 60 days
 """
 import argparse
 import csv
@@ -127,18 +129,26 @@ def calc_fills_pnl(fills, min_ts: int, max_ts: int):
 
     def parse_fill(f):
         side = f.get("side", "yes")
-        # YES-equivalent price: API may use dollars (0.03) or cents (3). For sell-NO use 1 - no_price.
-        raw_yes = float(f.get("yes_price_fixed") or 0)
-        raw_no = float(f.get("no_price_fixed") or 0)
+        # YES-equivalent price: API may use dollars (0.03) or cents (3). Try multiple keys.
+        raw_yes = float(f.get("yes_price_fixed") or f.get("yes_price_dollars") or 0)
+        raw_no = float(f.get("no_price_fixed") or f.get("no_price_dollars") or 0)
         if side == "no":
             price = 1.0 - (raw_no if raw_no <= 1 else raw_no / 100)
         else:
             price = raw_yes if raw_yes <= 1 else raw_yes / 100
+        # API may return count (int) or count_fp (str e.g. "100.00")
+        cnt = f.get("count")
+        if cnt is None and f.get("count_fp") is not None:
+            try:
+                cnt = int(float(f["count_fp"]))
+            except (ValueError, TypeError):
+                cnt = 0
+        cnt = int(cnt) if cnt is not None else 0
         return {
             "ticker": f.get("ticker"),
             "side": side,
             "action": f.get("action", "buy"),
-            "count": int(f.get("count", 0)),
+            "count": cnt,
             "price": price,
             "ts": f.get("ts") or parse_ts(f.get("created_time", "")),
             "created_time": f.get("created_time"),
@@ -271,11 +281,58 @@ def load_pnl_from_kalshi_csv(csv_path: str, month_filter: str | None) -> tuple[f
     return total_cents / 100.0, trades
 
 
+def load_pnl_from_fish_csv(csv_path: str, days: int | None) -> tuple[float, list[dict]]:
+    """
+    Load PnL from logs/fish_pnl.csv (internal fish_trade log).
+    Columns: datetime,city,ticker,qty,entry_price,exit_price,pnl
+    Returns (total_pnl_dollars, list of trade dicts).
+    """
+    trades = []
+    cutoff = (datetime.now() - timedelta(days=days)) if days else None
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if (row.get("ticker") or "").strip() == "":
+                continue
+            ticker = (row.get("ticker") or "").strip()
+            if not is_fish_ticker(ticker):
+                continue
+            try:
+                dt_str = (row.get("datetime") or "").strip()
+                if cutoff and dt_str:
+                    try:
+                        dt = datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S")
+                        if dt < cutoff:
+                            continue
+                    except ValueError:
+                        pass
+                qty = float(row.get("qty") or 0)
+                entry = float(row.get("entry_price") or 0)
+                exit_p = float(row.get("exit_price") or 0)
+                pnl = float(row.get("pnl") or 0)
+            except (ValueError, TypeError):
+                continue
+            if qty <= 0:
+                continue
+            trades.append({
+                "ticker": ticker,
+                "city": (row.get("city") or extract_city(ticker)).strip(),
+                "qty": int(qty),
+                "entry": entry,
+                "exit": exit_p,
+                "pnl": pnl,
+                "is_low": "LOW" in ticker.upper(),
+                "is_high": "HIGH" in ticker.upper(),
+            })
+    return sum(t["pnl"] for t in trades), trades
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze Kalshi fish trades PnL (API or CSV export)")
     parser.add_argument("--csv", type=str, default=None, metavar="PATH", help="Use Kalshi transactions CSV (all amounts in CENTS)")
+    parser.add_argument("--fish-pnl", action="store_true", help="Use logs/fish_pnl.csv (internal fish_trade log - your actual trades)")
     parser.add_argument("--today", action="store_true", help="Analyze only today's trades (since midnight local)")
-    parser.add_argument("--days", type=int, default=None, metavar="N", help="Analyze last N days (default: 7)")
+    parser.add_argument("--days", type=int, default=None, metavar="N", help="Analyze last N days (default: 30 for API/fish-pnl, 7 for today)")
     parser.add_argument("--month", type=str, default=None, metavar="MAR|2026-03", help="Filter to month: MAR or 2026-03 (market date from ticker)")
     args = parser.parse_args()
 
@@ -341,6 +398,68 @@ def main():
         print(f"\nSaved to {out_path}")
         return
 
+    # ---------- Fish PnL path (logs/fish_pnl.csv) ----------
+    if args.fish_pnl:
+        base = Path(__file__).resolve().parent.parent
+        fish_path = base / "logs" / "fish_pnl.csv"
+        if not fish_path.exists():
+            print(f"File not found: {fish_path}")
+            print("Run fish_trade.py first to generate fish_pnl.csv")
+            return
+        n_days = args.days if args.days is not None else 30
+        print(f"Loading from fish_pnl.csv (last {n_days} days): {fish_path}")
+        total_pnl, trades = load_pnl_from_fish_csv(str(fish_path), n_days)
+        print("\n" + "=" * 60)
+        print("PNL SUMMARY (from fish_pnl.csv - your actual trades)" + (f" [last {n_days} days]" if n_days else ""))
+        print("=" * 60)
+        print(f"  Total PnL: ${total_pnl:.2f}")
+        print(f"  Trades: {len(trades)}")
+
+        low_trades = [t for t in trades if t["is_low"]]
+        high_trades = [t for t in trades if t["is_high"]]
+        low_pnl = sum(t["pnl"] for t in low_trades)
+        high_pnl = sum(t["pnl"] for t in high_trades)
+        print("\n" + "=" * 60)
+        print("BY TYPE (LOW vs HIGH)")
+        print("=" * 60)
+        print(f"  LOW:  {len(low_trades)} trades, ${low_pnl:.2f}")
+        print(f"  HIGH: {len(high_trades)} trades, ${high_pnl:.2f}")
+
+        by_city = defaultdict(float)
+        for t in trades:
+            by_city[t["city"]] += t["pnl"]
+        print("\n" + "=" * 60)
+        print("BY CITY")
+        print("=" * 60)
+        for city in sorted(by_city.keys()):
+            if city:
+                print(f"  {city}: ${by_city[city]:.2f}")
+
+        wins = [t for t in trades if t["pnl"] > 0]
+        losses = [t for t in trades if t["pnl"] < 0]
+        print("\n" + "=" * 60)
+        print("STRATEGY SUMMARY (why something might be wrong)")
+        print("=" * 60)
+        print(f"  Trades: {len(trades)}, Wins: {len(wins)} (${sum(t['pnl'] for t in wins):.2f}), Losses: {len(losses)} (${sum(t['pnl'] for t in losses):.2f})")
+        if trades:
+            print(f"  Win rate: {100.0 * len(wins) / len(trades):.1f}%  |  Avg PnL per trade: ${total_pnl / len(trades):.2f}")
+        if losses:
+            print("\n  Worst losses:")
+            for t in sorted(losses, key=lambda x: x["pnl"])[:10]:
+                print(f"    {t['ticker']}: qty={t['qty']} entry={t['entry']:.2f} exit={t['exit']:.2f} pnl=${t['pnl']:.2f}")
+
+        out_path = base / "logs" / "pnl_analysis.csv"
+        out_path.parent.mkdir(exist_ok=True)
+        suffix = "_fishpnl" + (f"_{n_days}d" if n_days else "")
+        out_path = out_path.parent / (out_path.stem + suffix + out_path.suffix)
+        with open(out_path, "w") as f:
+            f.write("source,ticker,city,qty,entry,exit,pnl,type\n")
+            for t in trades:
+                ttype = "LOW" if t["is_low"] else "HIGH"
+                f.write(f"fish_pnl,{t['ticker']},{t['city']},{t['qty']},{t['entry']:.4f},{t['exit']:.4f},{t['pnl']:.4f},{ttype}\n")
+        print(f"\nSaved to {out_path}")
+        return
+
     # ---------- API path ----------
     load_dotenv()
     KEYID = os.getenv("PROD_KEYID")
@@ -359,7 +478,7 @@ def main():
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         days_label = "today"
     else:
-        n = args.days if args.days is not None else (60 if args.month else 7)
+        n = args.days if args.days is not None else (60 if args.month else 30)
         start = now - timedelta(days=n)
         days_label = f"last {n} days"
     min_ts = int(start.timestamp())

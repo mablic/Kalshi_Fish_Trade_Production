@@ -9,6 +9,16 @@ import json
 from requests.exceptions import HTTPError
 
 from cryptography.hazmat.primitives import serialization, hashes
+
+
+def _price_2dec(s: Optional[str]) -> Optional[str]:
+    """Round price to 2 decimals for Kalshi API tick."""
+    if s is None:
+        return None
+    try:
+        return f"{round(float(s), 2):.2f}"
+    except (ValueError, TypeError):
+        return s
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.exceptions import InvalidSignature
 
@@ -314,10 +324,10 @@ class KalshiHttpClient(KalshiBaseClient):
             "ticker": ticker, 
             "side": side,    
             "action": action,
-            "count": count,
+            "count": int(count) if count is not None else None,
             "type": type,
-            "yes_price_dollars": yes_price_dollars,  
-            "no_price_dollars": no_price_dollars,
+            "yes_price_dollars": _price_2dec(yes_price_dollars),  
+            "no_price_dollars": _price_2dec(no_price_dollars),
             "time_in_force": time_in_force,
             "status": "resting",
             "reduce_only": reduce_only,
@@ -325,7 +335,6 @@ class KalshiHttpClient(KalshiBaseClient):
         }
         # Remove None values to avoid API errors
         playload = {k: v for k, v in playload.items() if v is not None}
-        # print(f"THE PLAYLOAD: {playload}")
         return self.post(self.portfolio_url + '/orders', body=playload)
 
 
@@ -345,10 +354,10 @@ class KalshiHttpClient(KalshiBaseClient):
             "ticker": ticker, 
             "side": side,    
             "action": action,
-            "count": count,
+            "count": int(count) if count is not None else None,
             "type": type,
-            "yes_price_dollars": yes_price_dollars,
-            "no_price_dollars": no_price_dollars,
+            "yes_price_dollars": _price_2dec(yes_price_dollars),
+            "no_price_dollars": _price_2dec(no_price_dollars),
             "time_in_force": time_in_force,
             "reduce_only": reduce_only,
         }

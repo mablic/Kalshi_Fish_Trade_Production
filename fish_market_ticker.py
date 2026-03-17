@@ -451,28 +451,28 @@ if __name__ == "__main__":
         environment=env
     )
 
-    # LAXmi only: get weather ranges (today = forecast+historical, tomorrow = forecast)
-    site_dict_LAX = {
-        "LAX": [
-            "https://forecast.weather.gov/product.php?site=LOX&product=CLI&issuedby=LAX",
-            "https://forecast.weather.gov/MapClick.php?lat=33.9435&lon=-118.4086&FcstType=digitalDWML",
-            "https://www.weather.gov/wrh/timeseries?site=KLAX",
+    # CHImi only: get weather ranges (today = forecast+historical, tomorrow = forecast)
+    site_dict_CHI = {
+        "CHI": [
+            "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=MDW",
+            "https://forecast.weather.gov/MapClick.php?lat=41.7885&lon=-87.7417&FcstType=digitalDWML",
+            "https://www.weather.gov/wrh/timeseries?site=KMDW",
         ],
     }
-    parse_weather = FISH_PARSE_WEATHER(site_dict_LAX)
+    parse_weather = FISH_PARSE_WEATHER(site_dict_CHI)
     all_weather = parse_weather.get_all_weather()
     today_str = datetime.now().strftime("%Y-%m-%d")
     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    LAX_weather = all_weather.get("LAX") or {}
-    today_forecast = LAX_weather.get(today_str, {}).get("forecast")
-    today_report = LAX_weather.get(today_str, {}).get("report")
+    CHI_weather = all_weather.get("CHI") or {}
+    today_forecast = CHI_weather.get(today_str, {}).get("forecast")
+    today_report = CHI_weather.get(today_str, {}).get("report")
     # Today: use report when available (e.g. [74, 84]); else forecast. Tomorrow: forecast only (same as fish_trade).
     today_range = today_report if today_report else today_forecast
-    tomorrow_range = LAX_weather.get(tomorrow_str, {}).get("forecast")
+    tomorrow_range = CHI_weather.get(tomorrow_str, {}).get("forecast")
 
     print("=" * 60)
-    print("LAXMI (LAX) – Weather ranges")
+    print("CHIMI (CHI) – Weather ranges")
     print("=" * 60)
     print(f"  Today    ({today_str}):  used range = {today_range}   (report = {today_report}, forecast = {today_forecast})")
     print(f"  Tomorrow ({tomorrow_str}): forecast range = {tomorrow_range}")
@@ -485,10 +485,10 @@ if __name__ == "__main__":
         print("Could not format dates for ticker")
     else:
         # All tickers in series (before volume filter)
-        low_series_today = f"kxlowtLAX-{date_fmt_today}"
-        high_series_today = f"kxhighLAX-{date_fmt_today}"
-        low_series_tomorrow = f"kxlowtLAX-{date_fmt_tomorrow}"
-        high_series_tomorrow = f"kxhighLAX-{date_fmt_tomorrow}"
+        low_series_today = f"kxlowtCHI-{date_fmt_today}"
+        high_series_today = f"kxhighCHI-{date_fmt_today}"
+        low_series_tomorrow = f"kxlowtCHI-{date_fmt_tomorrow}"
+        high_series_tomorrow = f"kxhighCHI-{date_fmt_tomorrow}"
 
         for label, series_ticker in [
             ("TODAY LOW", low_series_today),
@@ -521,6 +521,6 @@ if __name__ == "__main__":
         ]:
             print(f"  --- {date_label} ({date_str}), weather_range={weather_range} ---")
             for kind, ticker_type in [("low", "low"), ("high", "high")]:
-                selected = mt.get_tickers_for_date(client, "LAX", date_str, weather_range, ticker_type=ticker_type)
+                selected = mt.get_tickers_for_date(client, "CHI", date_str, weather_range, ticker_type=ticker_type)
                 print(f"    {kind}: {selected}")
             print()
