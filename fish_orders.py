@@ -470,6 +470,9 @@ class FISH_ORDERS_MANAGER:
     def get_open_sell_orders(self):
         return self.open_sell_orders
 
+    def get_filled_orders(self):
+        return self.filled_orders
+
     def process_midnight_expiry(self, today_str: str):
         """
         At midnight: all open sell orders for markets that expired (market date < today)

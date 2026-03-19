@@ -45,10 +45,10 @@ class FISH_TRADE_TIME:
 
     # --- Next day: tmr high (bought yesterday, close 5-7AM) ---
     TMR_LOW_CLOSE_HOURS = (17, 18, 19)
-    TMR_HIGH_CLOSE_HOURS = (21, 23, 50)
+    TMR_HIGH_CLOSE_HOURS = (23, 30, 50)
 
     # --- Next day: today high ---
-    TODAY_HIGH_START_HOUR = 8
+    TODAY_HIGH_START_HOUR = 7
     TODAY_HIGH_CLOSE_HOURS = (10, 11, 12)
     TODAY_HIGH_STOP_HOUR = 9            # 9AM: cancel remaining unfilled buy orders
 

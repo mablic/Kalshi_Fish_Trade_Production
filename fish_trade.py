@@ -19,7 +19,7 @@ TRADE_SIZE = 100
 VOLUME_THRESHOLD = 100
 FISH_INCENTIVE_THRESHOLD = 0.02
 FISH_INCENTIVE_VOLUME_THRESHOLD = 500
-FISH_INCENTIVE_TRADE_SIZE = 1
+FISH_INCENTIVE_TRADE_SIZE = 150
 
 class FISH_TRADE:
     # Resolve log path from this file so it works regardless of cwd
@@ -100,26 +100,25 @@ class FISH_TRADE:
 
     def check_outstanding_orders(self):
         for ticker, order in list(self.orders_manager.get_open_buy_orders().items()):
+            should_cancel = False
             if self.trade_time.is_today_low_stop_trade_time() and self.market_ticker.is_today_low_ticker(order.ticker):
                 self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (today low stop)")
-                self._cancel_order_safe(order.order_id, order.ticker)
-                self.orders_manager.open_buy_orders.pop(order.ticker)
-            if self.trade_time.is_today_high_stop_trade_time() and self.market_ticker.is_today_high_ticker(order.ticker):
+                should_cancel = True
+            elif self.trade_time.is_today_high_stop_trade_time() and self.market_ticker.is_today_high_ticker(order.ticker):
                 self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (today high stop)")
-                self._cancel_order_safe(order.order_id, order.ticker)
-                self.orders_manager.open_buy_orders.pop(order.ticker)
-            if self.trade_time.is_tomorrow_low_stop_trade_time() and self.market_ticker.is_tomorrow_low_ticker(order.ticker):
+                should_cancel = True
+            elif self.trade_time.is_tomorrow_low_stop_trade_time() and self.market_ticker.is_tomorrow_low_ticker(order.ticker):
                 self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (tomorrow low stop)")
-                self._cancel_order_safe(order.order_id, order.ticker)
-                self.orders_manager.open_buy_orders.pop(order.ticker)
-            if self.trade_time.is_tomorrow_high_stop_trade_time() and self.market_ticker.is_tomorrow_high_ticker(order.ticker):
+                should_cancel = True
+            elif self.trade_time.is_tomorrow_high_stop_trade_time() and self.market_ticker.is_tomorrow_high_ticker(order.ticker):
                 self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (tomorrow high stop)")
-                self._cancel_order_safe(order.order_id, order.ticker)
-                self.orders_manager.open_buy_orders.pop(order.ticker)
-            if self.trade_time.is_fish_incentive_stop_trade_time() and order.trade_type == 'incentive_trade':
+                should_cancel = True
+            elif self.trade_time.is_fish_incentive_stop_trade_time() and order.trade_type == 'incentive_trade':
                 self.log(f"{self.get_datetime()} [CANCEL INCENTIVE BUY] {order.ticker} qty={order.remaining_quantity} (fish incentive stop)")
+                should_cancel = True
+            if should_cancel:
                 self._cancel_order_safe(order.order_id, order.ticker)
-                self.orders_manager.open_buy_orders.pop(order.ticker)
+                self.orders_manager.open_buy_orders.pop(order.ticker, None)
 
         for ticker, order in list(self.orders_manager.get_open_sell_orders().items()):
             stage = 0
@@ -233,7 +232,6 @@ class FISH_TRADE:
                     if existing is not None:
                         existing.order_id = order.get('order_id', '')
                         existing.remaining_quantity = rem
-                        existing.trade_type = 'fish_order'
                 else:
                     # Resting sell: only sync existing from state (above loop). Do not add from API.
                     pass
@@ -269,7 +267,7 @@ class FISH_TRADE:
                     sell_qty = open_positions_qty.get(ticker, 0)
                     # order is from API (dict); price in yes_price_dollars or no_price_dollars
                     raw_price = order.get('yes_price_dollars') or order.get('no_price_dollars') or '0'
-                    yes_price = f"{float(raw_price):.4f}"
+                    yes_price = f"{float(raw_price):.2f}"
                     no_price = None
                     try:
                         response = self.client.create_open_order(
@@ -341,7 +339,11 @@ class FISH_TRADE:
                 continue
             order.remaining_quantity = sell_qty
 
-            yes_price = f"{float(order.price):.4f}"
+            order_book = self.client.get_market_ticker_order_book(ticker)
+            order_book_fp = order_book.get('orderbook_fp') or order_book.get('orderbook')
+            price_strategy = FISH_PRICE_STRATEGY()
+            best_ask = price_strategy.get_best_ask(order_book_fp)
+            yes_price = f"{float(max(best_ask, order.price)):.2f}"
             no_price = None
             if order.order_execution_type == 'new':
                 try:
@@ -424,20 +426,29 @@ class FISH_TRADE:
         incentive_response = self.client.get_market_incentive()
         self.fish_incentive.load_from_incentive_programs(incentive_response)
         incentive_tickers = self.fish_incentive.get_fish_incentive_tickers()
-        incentive_market_orders = {}
 
         for ticker in incentive_tickers:
             market_orders = self.client.get_market_ticker_order_book(ticker)
-            self.fish_incentive.update_fish_incentive_market_ticker(ticker,market_orders)
+            self.fish_incentive.update_fish_incentive_market_ticker(ticker, market_orders)
         
         fish_ticker_market_orders = self.fish_incentive.get_fish_ticker_market_orders()
         log_label = "incentive_trade"
         for ticker in fish_ticker_market_orders.keys():
+            if self.market_ticker.is_today_high_ticker(ticker):
+                self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - today high ticker")
+                continue
+            elif self.market_ticker.is_today_low_ticker(ticker):
+                self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - today low ticker")
+                continue
+            if fish_ticker_market_orders[ticker] is None:
+                self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - no market orders")
+                continue
             try:
                 # Skip if we already have an open buy order for this ticker (e.g. from before restart)
-                existing = self.orders_manager.open_buy_orders.get(ticker)
+                existing = self.orders_manager.open_buy_orders.get(ticker) or self.orders_manager.open_sell_orders.get(ticker)
                 if existing and existing.order_id:
                     self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - already have open buy order_id={existing.order_id} remaining={existing.remaining_quantity}")
+                    self.orders_manager.open_buy_orders[ticker].trade_type = log_label
                     continue
                 price = fish_ticker_market_orders[ticker]
                 if price is not None:
@@ -487,10 +498,19 @@ class FISH_TRADE:
         
         all_open_buy_orders = self.orders_manager.get_open_buy_orders()
         for ticker, order in all_open_buy_orders.items():
+            filled_orders = self.orders_manager.get_filled_orders()
+            if ticker in filled_orders:
+                if filled_orders[ticker].action == 'buy':
+                    self.log(f"{self.get_datetime()} [SKIP BUY] {ticker} - already filled")
+                    continue
+                else:
+                    if filled_orders[ticker].remaining_quantity > 0:
+                        self.log(f"{self.get_datetime()} [SKIP BUY] {ticker} - already partially filled")
+                        continue
             if order.order_execution_type != 'new':
                 continue
             try:
-                response = self.client.create_open_order(ticker, 'yes', 'buy', order.quantity, 'limit', f"{float(order.price):.4f}")
+                response = self.client.create_open_order(ticker, 'yes', 'buy', order.quantity, 'limit', f"{float(order.price):.2f}")
                 if response and 'order' in response:
                     order_id = response['order'].get('order_id', '')
                     order.order_id = order_id
@@ -584,13 +604,13 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=PHI&product=CLI&issuedby=PHL",
             "https://forecast.weather.gov/MapClick.php?lat=39.8764&lon=-75.2422&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KPHL",
-            10,
+            5,
         ],
         "CHI": [
             "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=MDW",
             "https://forecast.weather.gov/MapClick.php?lat=41.7885&lon=-87.7417&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMDW",
-            10,
+            5,
         ],
         "NYC": [
             "https://forecast.weather.gov/product.php?site=OKX&product=CLI&issuedby=NYC",
@@ -608,7 +628,7 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=LOX&product=CLI&issuedby=LAX",
             "https://forecast.weather.gov/MapClick.php?lat=33.9435&lon=-118.4086&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KLAX",
-            100,
+            200,
         ],
         "MIA": [
             "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MIA",
@@ -668,7 +688,7 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=MTR&product=CLI&issuedby=SFO",
             "https://forecast.weather.gov/MapClick.php?lat=37.7801&lon=-122.4202&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSFO",
-            100,
+            150,
         ],
         "TSEA": [
             "https://forecast.weather.gov/product.php?site=SEW&product=CLI&issuedby=SEA",

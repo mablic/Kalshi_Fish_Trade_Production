@@ -62,6 +62,7 @@ class FISH_INCENTIVE:
         ob = market_orders.get('orderbook') or market_orders.get('orderbook_fp') or market_orders
         yes_book = ob.get('yes_dollars') or ob.get('yes') or []
         if not yes_book:
+            self.fish_ticker_market_orders[ticker] = None
             return
 
         entries = []

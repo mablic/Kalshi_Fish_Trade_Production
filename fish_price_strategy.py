@@ -71,6 +71,23 @@ class FISH_PRICE_STRATEGY:
             return None
         return min(order_book_prices)
 
+    def get_best_ask(self, market_book: dict) -> float | None:
+        """Best ask = lowest price at which we can sell (top of book for YES)."""
+        order_book = market_book.get('no_dollars', market_book.get('no', []))
+        results = []
+        if not order_book:
+            return self.__MIN_PRICE
+        if order_book:
+            for pe in order_book:
+                try:
+                    p = float(pe[0])
+                    if p > 1:
+                        p = p / 100
+                    results.append(1 - round(float(p), 2))
+                except (ValueError, TypeError, IndexError):
+                    continue
+        return min(results)
+
     def get_buy_price_strategy(self, market_book: dict):
         """
         Find buy price for a RESTING order (maker).

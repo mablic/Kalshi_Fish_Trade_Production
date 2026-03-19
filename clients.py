@@ -240,9 +240,13 @@ class KalshiHttpClient(KalshiBaseClient):
         """Retrieves the fills."""
         return self.get(self.portfolio_url + '/fills?min_ts=' + str(min_ts))
 
-    def get_market_incentive(self):
-        """Retrieves market data for a given market ID."""
-        return self.get(f"/trade-api/v2/incentive_programs")
+    def get_market_incentive(self, status: str = "active") -> Dict[str, Any]:
+        """
+        Retrieves active incentive programs only.
+        """
+        params = {"status": status, "limit": 10000}
+        resp = self.get("/trade-api/v2/incentive_programs", params=params)
+        return resp
 
 
     def get_market_ticker(self, ticker: Optional[str] = None):
