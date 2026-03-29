@@ -217,6 +217,7 @@ class FISH_ORDERS_MANAGER:
         self.placed_order_ids = set()  # Only add fills for orders we placed
         self.processed_fill_ids = set()  # Dedupe: skip fills we've already processed
         self.state_file = STATE_FILE
+        self._last_midnight_expiry_date = None  # YYYY-MM-DD; run process_midnight_expiry once per day in 0–2am window
 
     def save_state(self):
         """Persist open/filled orders and IDs to JSON for restart recovery."""
@@ -475,19 +476,29 @@ class FISH_ORDERS_MANAGER:
 
     def process_midnight_expiry(self, today_str: str):
         """
-        At midnight: all open sell orders for markets that expired (market date < today)
-        are treated as lost. Log negative PnL = -entry_price * remaining_quantity.
+        At midnight: all orders for markets that expired (market date < today)
+        are removed from order_manager. Open sell orders log negative PnL.
+        State is cleaned so save_state() writes JSON without expired tickers.
         """
+        all_tickers = set(self.open_buy_orders.keys()) | set(self.open_sell_orders.keys()) | set(self.filled_orders.keys()) | set(self.fish_orders.keys())
         expired = []
-        for ticker, order in list(self.open_sell_orders.items()):
+        for ticker in all_tickers:
             market_date = _extract_market_date_from_ticker(ticker)
             if market_date and market_date < today_str:
+                expired.append(ticker)
+
+        for ticker in expired:
+            if ticker in self.open_sell_orders:
+                order = self.open_sell_orders[ticker]
                 qty_unfilled = order.remaining_quantity
                 cost = order.entry_price * qty_unfilled
                 pnl = -round(cost, 4)
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 city = _extract_city_from_ticker(ticker)
                 _log_pnl_csv(self.pnl_log_file, ts, city, ticker, qty_unfilled, order.entry_price, 0, pnl)
-                expired.append(ticker)
-        for ticker in expired:
-            self.open_sell_orders.pop(ticker)
+            self.open_buy_orders.pop(ticker, None)
+            self.open_sell_orders.pop(ticker, None)
+            self.filled_orders.pop(ticker, None)
+            self.fish_orders.pop(ticker, None)
+            self.settled_orders.pop(ticker, None)
+            self.executed_sell_orders.discard(ticker)

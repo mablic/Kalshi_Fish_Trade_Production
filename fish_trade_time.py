@@ -33,9 +33,9 @@ class FISH_TRADE_TIME:
     __instance = None
 
     # --- Today: tomorrow low/high ---
-    TOMORROW_LOW_START_HOUR = 10
+    TOMORROW_LOW_START_HOUR = 9
     TOMORROW_LOW_STOP_HOUR = 16   # 4PM
-    TOMORROW_HIGH_START_HOUR = 10
+    TOMORROW_HIGH_START_HOUR = 9
     TOMORROW_HIGH_STOP_HOUR = 20  # 8PM
 
     # --- Next day: today low ---
@@ -97,7 +97,7 @@ class FISH_TRADE_TIME:
     def is_tomorrow_low_start_trade_time(self) -> bool:
         """Start any time within 10AM hour (10:00-10:59)."""
         h = self._hour()
-        if h >= self.TOMORROW_LOW_START_HOUR + 2 or self.__START_TOMORROW_LOW:
+        if h >= self.TOMORROW_LOW_START_HOUR + 3 or self.__START_TOMORROW_LOW:
             return False
         if h >= self.TOMORROW_LOW_START_HOUR:
             self.__START_TOMORROW_LOW = True
@@ -107,7 +107,7 @@ class FISH_TRADE_TIME:
     def is_tomorrow_high_start_trade_time(self) -> bool:
         """Start any time within 10AM hour (10:00-10:59)."""
         h = self._hour()
-        if h >= self.TOMORROW_HIGH_START_HOUR + 2 or self.__START_TOMORROW_HIGH:
+        if h >= self.TOMORROW_HIGH_START_HOUR + 3 or self.__START_TOMORROW_HIGH:
             return False
         if h >= self.TOMORROW_HIGH_START_HOUR:
             self.__START_TOMORROW_HIGH = True

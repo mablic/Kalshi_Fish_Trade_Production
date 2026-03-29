@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import Optional
 
 
 class FISH_MARKET_TICKER:
@@ -10,6 +11,16 @@ class FISH_MARKET_TICKER:
             cls.__instance = super(FISH_MARKET_TICKER, cls).__new__(cls)
         return cls.__instance
 
+
+    def _kalshi_city_for_low_series(self, city_upper: str) -> str:
+        """
+        Low series is kxlowt{city}. If city starts with T (TNOLA, TSEA, …), concatenating
+        yields kxlowtTNOLA → KXLOWTTNOLA (invalid). Kalshi uses KXLOWTNOLA (one T).
+        Strip the leading T for that case.
+        """
+        if city_upper.startswith("T") and len(city_upper) > 1:
+            return city_upper[1:]
+        return city_upper
 
     def _format_date_for_ticker(self, date_str: str):
         """
@@ -26,6 +37,23 @@ class FISH_MARKET_TICKER:
         except (ValueError, AttributeError):
             return None
 
+    def _markets_api_query(self, client, key: str, status: Optional[str] = None):
+        """
+        Keys like KXHIGHMIA-26MAR27 are **event** tickers (one day, all strikes). Kalshi expects
+        `event_ticker=...`; using `series_ticker=...` with the same string returns incomplete markets
+        (missing strikes e.g. B85.5). Bare series like KXHIGHMIA use `series_ticker`.
+        """
+        key_u = key.upper()
+        parts = key_u.split("-")
+        dated_event = len(parts) >= 2 and len(parts[1]) >= 7 and parts[1][:2].isdigit()
+        if dated_event:
+            return client.get_markets_by_series(
+                event_ticker=key_u, status=status, limit=1000, fetch_all=True
+            )
+        return client.get_markets_by_series(
+            series_ticker=key_u, status=status, limit=1000, fetch_all=True
+        )
+
     def _get_markets_by_series(self, client, series_ticker: str):
         """
         Get all markets in a series from Kalshi API using the client.
@@ -36,9 +64,9 @@ class FISH_MARKET_TICKER:
             client: KalshiHttpClient instance
             series_ticker: Series ticker to search for
         """
-        # Try 1: Search by series_ticker with status filter
+        # Try 1: Search with status filter (open)
         try:
-            response = client.get_markets_by_series(series_ticker=series_ticker.upper(), status="open", limit=1000)
+            response = self._markets_api_query(client, series_ticker, status="open")
             if response and 'markets' in response:
                 markets = [m["ticker"] for m in response['markets']]
                 if markets:
@@ -48,7 +76,7 @@ class FISH_MARKET_TICKER:
         
         # Try 2: Search without status filter
         try:
-            response = client.get_markets_by_series(series_ticker=series_ticker.upper(), limit=1000)
+            response = self._markets_api_query(client, series_ticker, status=None)
             if response and 'markets' in response:
                 markets = [m["ticker"] for m in response['markets']]
                 if markets:
@@ -60,7 +88,7 @@ class FISH_MARKET_TICKER:
         # Extract base series (e.g., "KXHIGHPHIL" from "KXHIGHPHIL-26JAN30")
         base_series = series_ticker.upper().split("-")[0]
         try:
-            response = client.get_markets_by_series(series_ticker=base_series, limit=1000)
+            response = self._markets_api_query(client, base_series, status=None)
             if response and 'markets' in response:
                 all_markets = [m["ticker"] for m in response['markets']]
                 # Filter markets that start with our series ticker
@@ -81,7 +109,7 @@ class FISH_MARKET_TICKER:
         
         for variant in city_variations[1:]:
             try:
-                response = client.get_markets_by_series(series_ticker=variant, limit=1000)
+                response = self._markets_api_query(client, variant, status=None)
                 if response and 'markets' in response:
                     all_markets = [m["ticker"] for m in response['markets']]
                     variant_series_ticker = series_ticker.upper().replace(base_series, variant)
@@ -91,33 +119,7 @@ class FISH_MARKET_TICKER:
             except Exception:
                 pass
         
-        # Try 4: Search all markets (no status filter) and filter by ticker prefix
-        try:
-            response = client.get_markets_by_series(limit=1000)
-            if response and 'markets' in response:
-                all_markets = [m["ticker"] for m in response['markets']]
-                filtered = [t for t in all_markets if t.startswith(series_ticker.upper())]
-                if filtered:
-                    return filtered
-                
-                date_part = series_ticker.upper().split("-")[1] if "-" in series_ticker.upper() else None
-                if date_part:
-                    if base_series.endswith("PHI") and not base_series.endswith("PHIL"):
-                        base_variant = base_series + "L"
-                        filtered_base = [t for t in all_markets if t.startswith(base_variant)]
-                        if filtered_base:
-                            filtered = [t for t in filtered_base if date_part in t]
-                            if filtered:
-                                return filtered
-                    
-                    filtered_base = [t for t in all_markets if t.startswith(base_series)]
-                    if filtered_base:
-                        filtered = [t for t in filtered_base if date_part in t]
-                        if filtered:
-                            return filtered
-        except Exception:
-            pass
-        
+        # Never paginate unfiltered /markets (entire exchange); that looks hung and can take minutes.
         return []
 
     def _order_book_total_volume(self, client, ticker: str) -> int:
@@ -152,14 +154,16 @@ class FISH_MARKET_TICKER:
         if not date_formatted:
             return []
 
-        low_series_ticker = f"kxlowt{kalshi_city}-{date_formatted}"
+        low_city = self._kalshi_city_for_low_series(kalshi_city)
+        low_series_ticker = f"kxlowt{low_city}-{date_formatted}"
         low_markets = self._get_markets_by_series(client, low_series_ticker)
 
         high_series_ticker = f"kxhigh{kalshi_city}-{date_formatted}"
         high_markets = self._get_markets_by_series(client, high_series_ticker)
 
         r = self.__ticker_range
-        n_keep_first = 2 * r + 1  # first 3 tickers: closest to target
+        # Closest N to target, then +1 from volume in ±2° band → 5 tickers (r=1 → N=4 + 1)
+        n_closest = 2 * r + 2
 
         def closest_n(tickers, target, n):
             with_temp = [(t, self._extract_temp_from_ticker(t)) for t in tickers]
@@ -172,12 +176,12 @@ class FISH_MARKET_TICKER:
             valid = [t for t in temps if t is not None]
             return sum(valid) / len(valid) if valid else None
 
-        def fourth_by_volume(full_tickers, target, first_three, kalshi_client):
-            """From full_tickers, pick one with temp in [target-2, target+2] not in first_three, with highest volume."""
-            first_set = set(first_three)
+        def extra_by_volume(full_tickers, target, already_chosen, kalshi_client):
+            """Pick one ticker in [target-2, target+2] not in already_chosen, highest order-book volume."""
+            chosen = set(already_chosen)
             in_band = []
             for t in full_tickers:
-                if t in first_set:
+                if t in chosen:
                     continue
                 temp = self._extract_temp_from_ticker(t)
                 if temp is None or temp < target - 2 or temp > target + 2:
@@ -191,42 +195,42 @@ class FISH_MARKET_TICKER:
 
         if weather_range is not None and len(weather_range) >= 2:
             low_val, high_val = weather_range[0], weather_range[1]
-            first_3_low = closest_n(low_markets, low_val, n_keep_first)
-            first_3_high = closest_n(high_markets, high_val, n_keep_first)
-            fourth_low = fourth_by_volume(low_markets, low_val, first_3_low, client)
-            fourth_high = fourth_by_volume(high_markets, high_val, first_3_high, client)
-            # Fallback: when no ticker in ±2 band, use 4th-closest so we return 4 when series has 4+
-            if fourth_low is None and len(low_markets) >= 4:
-                first_4 = closest_n(low_markets, low_val, 4)
-                fourth_low = first_4[3] if len(first_4) > 3 else None
-            if fourth_high is None and len(high_markets) >= 4:
-                first_4 = closest_n(high_markets, high_val, 4)
-                fourth_high = first_4[3] if len(first_4) > 3 else None
-            low_markets = first_3_low + ([fourth_low] if fourth_low else [])
-            high_markets = first_3_high + ([fourth_high] if fourth_high else [])
+            first_n_low = closest_n(low_markets, low_val, n_closest)
+            first_n_high = closest_n(high_markets, high_val, n_closest)
+            extra_low = extra_by_volume(low_markets, low_val, first_n_low, client)
+            extra_high = extra_by_volume(high_markets, high_val, first_n_high, client)
+            # Fallback: no volume pick in band → use (n_closest+1)th closest
+            if extra_low is None and len(low_markets) > n_closest:
+                alt = closest_n(low_markets, low_val, n_closest + 1)
+                extra_low = alt[n_closest] if len(alt) > n_closest else None
+            if extra_high is None and len(high_markets) > n_closest:
+                alt = closest_n(high_markets, high_val, n_closest + 1)
+                extra_high = alt[n_closest] if len(alt) > n_closest else None
+            low_markets = first_n_low + ([extra_low] if extra_low else [])
+            high_markets = first_n_high + ([extra_high] if extra_high else [])
         else:
             if low_markets:
                 t = median_target(low_markets)
                 if t is not None:
-                    first_3 = closest_n(low_markets, t, n_keep_first)
-                    fourth = fourth_by_volume(low_markets, t, first_3, client)
-                    if fourth is None and len(low_markets) >= 4:
-                        first_4 = closest_n(low_markets, t, 4)
-                        fourth = first_4[3] if len(first_4) > 3 else None
-                    low_markets = first_3 + ([fourth] if fourth else [])
+                    first_n = closest_n(low_markets, t, n_closest)
+                    extra = extra_by_volume(low_markets, t, first_n, client)
+                    if extra is None and len(low_markets) > n_closest:
+                        alt = closest_n(low_markets, t, n_closest + 1)
+                        extra = alt[n_closest] if len(alt) > n_closest else None
+                    low_markets = first_n + ([extra] if extra else [])
                 else:
-                    low_markets = low_markets[:n_keep_first]
+                    low_markets = low_markets[: n_closest + 1]
             if high_markets:
                 t = median_target(high_markets)
                 if t is not None:
-                    first_3 = closest_n(high_markets, t, n_keep_first)
-                    fourth = fourth_by_volume(high_markets, t, first_3, client)
-                    if fourth is None and len(high_markets) >= 4:
-                        first_4 = closest_n(high_markets, t, 4)
-                        fourth = first_4[3] if len(first_4) > 3 else None
-                    high_markets = first_3 + ([fourth] if fourth else [])
+                    first_n = closest_n(high_markets, t, n_closest)
+                    extra = extra_by_volume(high_markets, t, first_n, client)
+                    if extra is None and len(high_markets) > n_closest:
+                        alt = closest_n(high_markets, t, n_closest + 1)
+                        extra = alt[n_closest] if len(alt) > n_closest else None
+                    high_markets = first_n + ([extra] if extra else [])
                 else:
-                    high_markets = high_markets[:n_keep_first]
+                    high_markets = high_markets[: n_closest + 1]
 
         if ticker_type == "low":
             return low_markets
@@ -241,7 +245,7 @@ class FISH_MARKET_TICKER:
         Args:
             client: KalshiHttpClient instance
             ticker_data: Dictionary with city codes as keys and date lists as values
-                        Format: {"CHI": ["2026-01-30", "2026-01-31"], ...}
+                        Format: {"MIA": ["2026-01-30", "2026-01-31"], ...}
         
         Returns:
             Dictionary with city codes as keys and nested dictionaries with dates and tickers
@@ -249,7 +253,7 @@ class FISH_MARKET_TICKER:
         self.temperature_ticker_dict = {}
         
         for city_code, date_list in ticker_data.items():
-            kalshi_city = city_code.lower()
+            kalshi_city_u = city_code.upper()
             city_tickers = {}
             
             for date_str in date_list:
@@ -260,12 +264,13 @@ class FISH_MARKET_TICKER:
                 date_tickers = []
                 
                 # Get low tickers: search series kxlowt{city}-{date}
-                low_series_ticker = f"kxlowt{kalshi_city}-{date_formatted}"
+                low_city = self._kalshi_city_for_low_series(kalshi_city_u)
+                low_series_ticker = f"kxlowt{low_city.lower()}-{date_formatted}"
                 low_markets = self._get_markets_by_series(client, low_series_ticker)
                 date_tickers.extend(low_markets)
                 
                 # Get high tickers: search series kxhigh{city}-{date}
-                high_series_ticker = f"kxhigh{kalshi_city}-{date_formatted}"
+                high_series_ticker = f"kxhigh{kalshi_city_u.lower()}-{date_formatted}"
                 high_markets = self._get_markets_by_series(client, high_series_ticker)
                 date_tickers.extend(high_markets)
                 
@@ -296,7 +301,7 @@ class FISH_MARKET_TICKER:
 
     def _extract_temp_from_ticker(self, ticker: str):
         """
-        Extract temperature value from ticker (e.g., "KXLOWTCHI-26MAR01-T27.5" -> 27.5)
+        Extract temperature value from ticker (e.g., "KXLOWTMIA-26MAR01-T27.5" -> 27.5)
         Returns float or None if temp cannot be extracted
         """
         try:
@@ -311,7 +316,7 @@ class FISH_MARKET_TICKER:
 
     def _extract_date_from_ticker(self, ticker: str) -> str:
         """
-        Extract date part from ticker (e.g., "26JAN30" from "KXLOWTCHI-26JAN30-B32.5")
+        Extract date part from ticker (e.g., "26JAN30" from "KXLOWTMIA-26JAN30-B32.5")
         Returns None if date cannot be extracted
         """
         try:
@@ -451,28 +456,29 @@ if __name__ == "__main__":
         environment=env
     )
 
-    # CHImi only: get weather ranges (today = forecast+historical, tomorrow = forecast)
-    site_dict_CHI = {
-        "CHI": [
-            "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=MDW",
-            "https://forecast.weather.gov/MapClick.php?lat=41.7885&lon=-87.7417&FcstType=digitalDWML",
-            "https://www.weather.gov/wrh/timeseries?site=KMDW",
+    # MIAmi only: get weather ranges (today = forecast+historical, tomorrow = forecast)
+    site_dict_MIA = {
+        "MIA": [
+            "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MIA",
+            "https://forecast.weather.gov/MapClick.php?lat=25.795&lon=-80.2798&FcstType=digitalDWML",
+            "https://www.weather.gov/wrh/timeseries?site=KMIA",
+            150,
         ],
     }
-    parse_weather = FISH_PARSE_WEATHER(site_dict_CHI)
+    parse_weather = FISH_PARSE_WEATHER(site_dict_MIA)
     all_weather = parse_weather.get_all_weather()
     today_str = datetime.now().strftime("%Y-%m-%d")
     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    CHI_weather = all_weather.get("CHI") or {}
-    today_forecast = CHI_weather.get(today_str, {}).get("forecast")
-    today_report = CHI_weather.get(today_str, {}).get("report")
+    MIA_weather = all_weather.get("MIA") or {}
+    today_forecast = MIA_weather.get(today_str, {}).get("forecast")
+    today_report = MIA_weather.get(today_str, {}).get("report")
     # Today: use report when available (e.g. [74, 84]); else forecast. Tomorrow: forecast only (same as fish_trade).
     today_range = today_report if today_report else today_forecast
-    tomorrow_range = CHI_weather.get(tomorrow_str, {}).get("forecast")
+    tomorrow_range = MIA_weather.get(tomorrow_str, {}).get("forecast")
 
     print("=" * 60)
-    print("CHIMI (CHI) – Weather ranges")
+    print("MIAMI (MIA) – Weather ranges")
     print("=" * 60)
     print(f"  Today    ({today_str}):  used range = {today_range}   (report = {today_report}, forecast = {today_forecast})")
     print(f"  Tomorrow ({tomorrow_str}): forecast range = {tomorrow_range}")
@@ -485,10 +491,10 @@ if __name__ == "__main__":
         print("Could not format dates for ticker")
     else:
         # All tickers in series (before volume filter)
-        low_series_today = f"kxlowtCHI-{date_fmt_today}"
-        high_series_today = f"kxhighCHI-{date_fmt_today}"
-        low_series_tomorrow = f"kxlowtCHI-{date_fmt_tomorrow}"
-        high_series_tomorrow = f"kxhighCHI-{date_fmt_tomorrow}"
+        low_series_today = f"kxlowtMIA-{date_fmt_today}"
+        high_series_today = f"kxhighMIA-{date_fmt_today}"
+        low_series_tomorrow = f"kxlowtMIA-{date_fmt_tomorrow}"
+        high_series_tomorrow = f"kxhighMIA-{date_fmt_tomorrow}"
 
         for label, series_ticker in [
             ("TODAY LOW", low_series_today),
@@ -521,6 +527,6 @@ if __name__ == "__main__":
         ]:
             print(f"  --- {date_label} ({date_str}), weather_range={weather_range} ---")
             for kind, ticker_type in [("low", "low"), ("high", "high")]:
-                selected = mt.get_tickers_for_date(client, "CHI", date_str, weather_range, ticker_type=ticker_type)
+                selected = mt.get_tickers_for_date(client, "MIA", date_str, weather_range, ticker_type=ticker_type)
                 print(f"    {kind}: {selected}")
             print()

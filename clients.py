@@ -253,25 +253,42 @@ class KalshiHttpClient(KalshiBaseClient):
         """Retrieves tickers for all markets."""
         return self.get(self.markets_url + '/' + ticker)
 
-    def get_markets_by_series(self, series_ticker: Optional[str] = None, status: Optional[str] = None, limit: int = 1000):
+    def get_markets_by_series(
+        self,
+        series_ticker: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 1000,
+        fetch_all: bool = True,
+    ):
         """
-        Get markets by series_ticker from Kalshi API.
-        
-        Args:
-            series_ticker: The series ticker to search for (e.g., "KXLOWTCHI-26JAN30")
-            status: Filter by status (e.g., "open", "closed"). If None, returns all statuses.
-            limit: Maximum number of results to return (default: 1000)
-        
-        Returns:
-            Dictionary with 'markets' list containing market data
+        Get markets from Kalshi GET /markets.
+
+        For a **specific day's weather strikes** (e.g. KXHIGHMIA-26MAR27), pass **event_ticker**,
+        not series_ticker — otherwise the API returns an incomplete list and strikes like B85.5 can be missing.
+
+        Paginates until cursor is empty when fetch_all is True.
         """
-        params = {"limit": limit}
-        if series_ticker:
-            params["series_ticker"] = series_ticker.upper()
-        if status:
-            params["status"] = status
-        
-        return self.get(self.markets_url, params=params)
+        all_markets: list = []
+        next_cursor: Optional[str] = None
+        page_limit = min(1000, limit) if limit else 1000
+        while True:
+            params: Dict[str, Any] = {"limit": page_limit}
+            if event_ticker:
+                params["event_ticker"] = event_ticker.upper()
+            elif series_ticker:
+                params["series_ticker"] = series_ticker.upper()
+            if status:
+                params["status"] = status
+            if next_cursor:
+                params["cursor"] = next_cursor
+            resp = self.get(self.markets_url, params=params)
+            chunk = resp.get("markets") or []
+            all_markets.extend(chunk)
+            next_cursor = resp.get("cursor") or None
+            if not fetch_all or not next_cursor:
+                break
+        return {"markets": all_markets, "cursor": next_cursor}
 
     def get_market_ticker_order_book(self, ticker: Optional[str] = None):
         """Retrieves order book for a given market."""

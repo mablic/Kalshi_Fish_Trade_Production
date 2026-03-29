@@ -88,8 +88,8 @@ class MockKalshiClient:
     def get_market_ticker_order_book(self, ticker):
         return self.test_data.get("order_books", {}).get(ticker, MOCK_ORDER_BOOK)
 
-    def get_markets_by_series(self, series_ticker=None, status=None, limit=1000):
-        return {"markets": [{"ticker": TEST_TICKER}]}
+    def get_markets_by_series(self, series_ticker=None, event_ticker=None, status=None, limit=1000, fetch_all=True):
+        return {"markets": [{"ticker": TEST_TICKER}], "cursor": None}
 
 
 class MockParseWeather:

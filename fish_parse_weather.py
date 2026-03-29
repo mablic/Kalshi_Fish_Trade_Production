@@ -275,6 +275,8 @@ class FISH_PARSE_WEATHER:
         "TSEA": "KSEA",
         "THOU": "KHOU",
         "TBOS": "KBOS",
+        "TLV": "KLAS",
+        "TMSP": "KMSP",
     }
 
     def _parse_historical_table(self, url: str, city_code: str = None):

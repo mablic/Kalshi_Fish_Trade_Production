@@ -18,8 +18,8 @@ from cryptography.hazmat.primitives import serialization
 TRADE_SIZE = 100
 VOLUME_THRESHOLD = 100
 FISH_INCENTIVE_THRESHOLD = 0.02
-FISH_INCENTIVE_VOLUME_THRESHOLD = 500
-FISH_INCENTIVE_TRADE_SIZE = 150
+FISH_INCENTIVE_VOLUME_THRESHOLD = 300
+FISH_INCENTIVE_TRADE_SIZE = 200
 
 class FISH_TRADE:
     # Resolve log path from this file so it works regardless of cwd
@@ -79,10 +79,13 @@ class FISH_TRADE:
             if ticker in self.orders_manager.open_sell_orders:
                 old_price = self.orders_manager.open_sell_orders[ticker].price
                 new_price = price_strategy.trade_price
+                if old_price == new_price:
+                    self.log(f"{self.get_datetime()} [SKIP SELL] {ticker} stage={stage} {old_price} -> {new_price} (no change)")
+                    return
                 self.orders_manager.open_sell_orders[ticker].price = new_price
                 self.orders_manager.open_sell_orders[ticker].order_execution_type = 'update'
                 self.orders_manager.open_sell_orders[ticker].last_updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                self.log(f"{self.get_datetime()} [SELL PRICE UPDATE] {ticker} stage={stage} {old_price} -> {new_price} (will cancel+replace on API)")
+                self.log(f"{self.get_datetime()} [UPDATE SELL] {ticker} stage={stage} {old_price} -> {new_price} (will cancel+replace on API)")
         except Exception as e:
             self.log(f"{self.get_datetime()} [ERROR] Failed to update sell order price strategy for ticker {ticker}: {str(e)}")
 
@@ -262,7 +265,7 @@ class FISH_TRADE:
                     self.orders_manager.open_sell_orders[ticker].remaining_quantity = open_positions_qty.get(ticker, 0)
                     self.orders_manager.open_sell_orders[ticker].order_execution_type = 'update'
                     self.orders_manager.open_sell_orders[ticker].last_updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.log(f"{self.get_datetime()} [UPDATE SELL] {ticker} qty={rem} -> {open_positions_qty.get(ticker, 0)} (cancel+replace applied on API)")
+                    self.log(f"{self.get_datetime()} [UPDATE OVER SELL] {ticker} qty={rem} -> {open_positions_qty.get(ticker, 0)} (cancel+replace applied on API)")
                     sell_side = 'yes'
                     sell_qty = open_positions_qty.get(ticker, 0)
                     # order is from API (dict); price in yes_price_dollars or no_price_dollars
@@ -396,6 +399,7 @@ class FISH_TRADE:
         if weather_range is None:
             weather_range = day_data.get('forecast') or day_data.get('report')
         ticker_type = "low" if "LOW" in log_label else "high" if "HIGH" in log_label else None
+        self.log(f"{self.get_datetime()} [BUY LOOP] {log_label} {city} {date_str} — resolving tickers")
         tickers = self.market_ticker.get_tickers_for_date(self.client, city, date_str, weather_range, ticker_type=ticker_type)
         for ticker in tickers:
             try:
@@ -420,14 +424,18 @@ class FISH_TRADE:
                     self.log(f"{self.get_datetime()} [SKIP {log_label}] {city} {ticker} - no resting buy price (best ask <= 0.01, would be taker)")
             except Exception as e:
                 self.log(f"{self.get_datetime()} [ERROR] {log_label} {city} {ticker}: {e}\n{traceback.format_exc()}")
-        self.log(f"{self.get_datetime()} [START {log_label}] {city}")
+        self.log(f"{self.get_datetime()} [BUY LOOP] {log_label} {city} done ({len(tickers)} tickers)")
 
     def create_fish_incentive_program(self):
         incentive_response = self.client.get_market_incentive()
         self.fish_incentive.load_from_incentive_programs(incentive_response)
-        incentive_tickers = self.fish_incentive.get_fish_incentive_tickers()
+        incentive_tickers = list(self.fish_incentive.get_fish_incentive_tickers())
+        n_inc = len(incentive_tickers)
+        self.log(f"{self.get_datetime()} [INCENTIVE] scanning {n_inc} weather incentive tickers (order book each)...")
 
-        for ticker in incentive_tickers:
+        for i, ticker in enumerate(incentive_tickers, 1):
+            if i == 1 or i == n_inc or (n_inc > 1 and i % 10 == 0):
+                self.log(f"{self.get_datetime()} [INCENTIVE] order book {i}/{n_inc} {ticker}")
             market_orders = self.client.get_market_ticker_order_book(ticker)
             self.fish_incentive.update_fish_incentive_market_ticker(ticker, market_orders)
         
@@ -448,7 +456,7 @@ class FISH_TRADE:
                 existing = self.orders_manager.open_buy_orders.get(ticker) or self.orders_manager.open_sell_orders.get(ticker)
                 if existing and existing.order_id:
                     self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - already have open buy order_id={existing.order_id} remaining={existing.remaining_quantity}")
-                    self.orders_manager.open_buy_orders[ticker].trade_type = log_label
+                    existing.trade_type = log_label
                     continue
                 price = fish_ticker_market_orders[ticker]
                 if price is not None:
@@ -462,7 +470,9 @@ class FISH_TRADE:
 
 
     def create_fish_buy_order(self):
+        self.log(f"{self.get_datetime()} [BUY LOOP] start (NWS weather + optional buys + API place)...")
         parsed_weather = self.parse_weather.get_all_weather()
+        self.log(f"{self.get_datetime()} [BUY LOOP] NWS done, {len(parsed_weather)} cities")
         today_date = datetime.now().strftime("%Y-%m-%d")
         tomorrow_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -471,18 +481,21 @@ class FISH_TRADE:
         #     for city in parsed_weather:
         #         self._create_fish_buy_orders_for_date(parsed_weather, city, today_date, "TODAY'S LOW TRADE")
         if self.trade_time.is_today_high_start_trade_time():
+            self.log(f"{self.get_datetime()} [BUY LOOP] phase today high, {len(parsed_weather)} cities")
             for city in parsed_weather:
                 try:
                     self._create_fish_buy_orders_for_date(parsed_weather, city, today_date, "TODAY'S HIGH TRADE")
                 except Exception as e:
                     self.log(f"{self.get_datetime()} [ERROR] create_fish_buy_order city={city} today_high: {e}\n{traceback.format_exc()}")
         if self.trade_time.is_tomorrow_low_start_trade_time():
+            self.log(f"{self.get_datetime()} [BUY LOOP] phase tomorrow low, {len(parsed_weather)} cities")
             for city in parsed_weather:
                 try:
                     self._create_fish_buy_orders_for_date(parsed_weather, city, tomorrow_date, "TOMORROW'S LOW TRADE")
                 except Exception as e:
                     self.log(f"{self.get_datetime()} [ERROR] create_fish_buy_order city={city} tomorrow_low: {e}\n{traceback.format_exc()}")
         if self.trade_time.is_tomorrow_high_start_trade_time():
+            self.log(f"{self.get_datetime()} [BUY LOOP] phase tomorrow high, {len(parsed_weather)} cities")
             for city in parsed_weather:
                 try:
                     self._create_fish_buy_orders_for_date(parsed_weather, city, tomorrow_date, "TOMORROW'S HIGH TRADE")
@@ -490,14 +503,20 @@ class FISH_TRADE:
                     self.log(f"{self.get_datetime()} [ERROR] create_fish_buy_order city={city} tomorrow_high: {e}\n{traceback.format_exc()}")
         if self.trade_time.is_fish_incentive_start_trade_time():
             try:
+                self.log(f"{self.get_datetime()} [BUY LOOP] phase fish incentive")
                 self.create_fish_incentive_program()
             except Exception as e:
                 self.log(f"{self.get_datetime()} [ERROR] create_fish_incentive_program: {e}\n{traceback.format_exc()}")
+            else:
+                self.log(f"{self.get_datetime()} [BUY LOOP] incentive scan finished")
         # for city in parsed_weather:
         #     self._create_fish_buy_orders_for_date(parsed_weather, city, tomorrow_date, "TOMORROW'S HIGH TRADE")
         
         all_open_buy_orders = self.orders_manager.get_open_buy_orders()
-        for ticker, order in all_open_buy_orders.items():
+        n_new = sum(1 for o in all_open_buy_orders.values() if o.order_execution_type == "new")
+        self.log(f"{self.get_datetime()} [BUY LOOP] placing up to {n_new} new resting buys on Kalshi API...")
+        # Snapshot: place-buy may pop from open_buy_orders on 404/409
+        for ticker, order in list(all_open_buy_orders.items()):
             filled_orders = self.orders_manager.get_filled_orders()
             if ticker in filled_orders:
                 if filled_orders[ticker].action == 'buy':
@@ -517,8 +536,17 @@ class FISH_TRADE:
                     order.order_execution_type = 'pending'
                     self.orders_manager.record_placed_order_id(order_id)
                     self.log(f"{self.get_datetime()} [PLACE BUY] {ticker} qty={order.quantity} @ {order.price} order_id={order_id}")
+            except HTTPError as e:
+                code = e.response.status_code if e.response is not None else None
+                self.log(f"{self.get_datetime()} [ERROR] Failed to place buy order {ticker}: {e}")
+                # 404 = market gone/closed; 409 = conflict (e.g. duplicate). Drop stale local state.
+                if code in (404, 409):
+                    self.orders_manager.open_buy_orders.pop(ticker, None)
+                    self.orders_manager.fish_orders.pop(ticker, None)
+                    self.log(f"{self.get_datetime()} [REMOVE STALE BUY] {ticker} removed from open_buy_orders (HTTP {code})")
             except Exception as e:
                 self.log(f"{self.get_datetime()} [ERROR] Failed to place buy order {ticker}: {e}")
+        self.log(f"{self.get_datetime()} [BUY LOOP] done")
 
     def start_trade(self):
         ensure_pnl_csv_exists()
@@ -534,8 +562,11 @@ class FISH_TRADE:
                     today_str = datetime.now().strftime("%Y-%m-%d")
                     tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
                     self.trade_time.update_dates(today_str, tomorrow_str)
-                    if datetime.now().hour == 0:
+                    # Expire closed-market state between midnight and 2am (not only at hour==0).
+                    now = datetime.now()
+                    if 0 <= now.hour < 2 and self.orders_manager._last_midnight_expiry_date != today_str:
                         self.orders_manager.process_midnight_expiry(today_str)
+                        self.orders_manager._last_midnight_expiry_date = today_str
                     try:
                         self.get_open_orders()  # First: sync placed_order_ids from API
                     except Exception as e:
@@ -560,6 +591,7 @@ class FISH_TRADE:
                         self.create_fish_buy_order()
                     except Exception as e:
                         self.log(f"{self.get_datetime()} [ERROR] create_fish_buy_order: {e}\n{traceback.format_exc()}")
+                    self.log(f"{self.get_datetime()} [TRADE CYCLE] completed (sync → sell → buy)")
                     break
                 except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ReadTimeout) as e:
                     self.log(f"{self.get_datetime()} [RETRY {attempt + 1}/{max_retries}] Transient error: {e}")
@@ -622,19 +654,19 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=EWX&product=CLI&issuedby=AUS",
             "https://forecast.weather.gov/MapClick.php?lat=30.1945&lon=-97.6699&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KAUS",
-            100,
+            50,
         ],
         "LAX": [
             "https://forecast.weather.gov/product.php?site=LOX&product=CLI&issuedby=LAX",
             "https://forecast.weather.gov/MapClick.php?lat=33.9435&lon=-118.4086&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KLAX",
-            200,
+            150,
         ],
         "MIA": [
             "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MIA",
             "https://forecast.weather.gov/MapClick.php?lat=25.795&lon=-80.2798&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMIA",
-            10,
+            50,
         ],
         "DEN": [
             "https://forecast.weather.gov/product.php?site=BOU&product=CLI&issuedby=DEN",
@@ -648,17 +680,11 @@ if __name__ == "__main__":
             "https://www.weather.gov/wrh/timeseries?site=KOKC",
             10,
         ],
-        "TMIN": [
-            "https://forecast.weather.gov/product.php?site=FSD&product=CLI&issuedby=MSP",
-            "https://forecast.weather.gov/MapClick.php?lat=44.882&lon=-93.2218&FcstType=digitalDWML",
-            "https://www.weather.gov/wrh/timeseries?site=KMSP",
-            10,
-        ],
         "TATL": [
             "https://forecast.weather.gov/product.php?site=FFC&product=CLI&issuedby=ATL",
             "https://forecast.weather.gov/MapClick.php?lat=33.7485&lon=-84.3915&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KATL",
-            10,
+            5,
         ],
         "TNOLA": [
             "https://forecast.weather.gov/product.php?site=LIX&product=CLI&issuedby=MSY",
@@ -670,7 +696,7 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=TUC&product=CLI&issuedby=PHX",
             "https://forecast.weather.gov/MapClick.php?lat=33.4355&lon=-111.998&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KPHX",
-            10,
+            100,
         ],
         "TSATX": [
             "https://forecast.weather.gov/product.php?site=CRP&product=CLI&issuedby=SAT",
@@ -700,13 +726,13 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=OUN&product=CLI&issuedby=HOU",
             "https://forecast.weather.gov/MapClick.php?lat=29.7608&lon=-95.3695&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KHOU",
-            10,
+            50,
         ],
         "TBOS": [
             "https://forecast.weather.gov/product.php?site=PVD&product=CLI&issuedby=BOS",
             "https://forecast.weather.gov/MapClick.php?lat=42.359&lon=-71.0586&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KBOS",
-            100,
+            50,
         ],
         "TLV": [
             "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=LAS",
@@ -718,7 +744,7 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MSP",
             "https://forecast.weather.gov/MapClick.php?lat=44.882&lon=-93.2218&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMSP",
-            10,
+            2,
         ],
     }
 
