@@ -274,7 +274,7 @@ class FISH_ORDERS_MANAGER:
         self.__FISH_ORDER_QUANTITY = value
 
     def add_open_order(self, order: FISH_ORDERS):
-        if order.trade_type != 'fish_order' and order.trade_type != 'incentive_trade':
+        if order.trade_type != 'fish_order' and order.trade_type != 'incentive_trade' and "BTC" in order.ticker:
             return
         if order.action == 'buy':
             if order.ticker in self.open_buy_orders:
@@ -295,7 +295,7 @@ class FISH_ORDERS_MANAGER:
     def add_filled_order(self, order: FISH_ORDERS):
         if order.fill_id and order.fill_id in self.processed_fill_ids:
             return  # Already processed this fill - skip
-        if order.ticker not in self.fish_orders:
+        if order.ticker not in self.fish_orders and "BTC" in order.ticker:
             return
         # For BUY fills: only add if order_id is from an order we placed
         # For SELL fills: we're reducing existing position - allow (we created the sell)

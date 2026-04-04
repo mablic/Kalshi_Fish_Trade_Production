@@ -17,6 +17,8 @@ fish_open_trade_ticker.json
 fish_trade.log
 fish_tester.log
 logs/
+scripts/
+test/
 debug_sell_no.json
 
 PRIVATE_KEY.pem

@@ -1,6 +1,10 @@
+from typing import Any
+
+
 import os
 import time
 import traceback
+from collections import defaultdict
 import requests
 from requests.exceptions import HTTPError
 from fish_orders import FISH_ORDERS, FISH_ORDERS_MANAGER, ensure_pnl_csv_exists, ensure_state_file_exists
@@ -40,6 +44,7 @@ class FISH_TRADE:
         self.site_dict = site_dict
         self.orders_manager.fish_order_quantity = TRADE_SIZE
         self.fish_incentive = FISH_INCENTIVE(fish_incentive_threshold=FISH_INCENTIVE_THRESHOLD, fish_incentive_volume_threshold=FISH_INCENTIVE_VOLUME_THRESHOLD)
+        self.sell_by_ticker = defaultdict()
 
     def get_datetime(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -177,14 +182,25 @@ class FISH_TRADE:
                 side=fill['side'],
                 quantity=float(fill['count_fp']),
                 remaining_quantity=float(fill['count_fp']),
-                entry_price=float(fill['yes_price_fixed']) if fill['side'] == 'yes' else float(fill['no_price_fixed']),
-                price=float(fill['yes_price_fixed']) if fill['side'] == 'yes' else float(fill['no_price_fixed']),
+                entry_price=float(fill['yes_price_dollars']) if fill['side'] == 'yes' else float(fill['no_price_dollars']),
+                price=float(fill['yes_price_dollars']) if fill['side'] == 'yes' else float(fill['no_price_dollars']),
                 created_at=fill['created_time'],
                 last_updated_at=None,
                 trade_type='market_order',
                 fill_id=fill_id or None,
             ))
     
+    @staticmethod
+    def _order_created_timestamp(order: dict) -> float:
+        """Kalshi order/fill ``created_time`` (ISO-8601, often with Z). Returns 0.0 if missing/unparseable."""
+        s = (order.get("created_time") or "").strip().replace("Z", "+00:00")
+        if not s:
+            return 0.0
+        try:
+            return datetime.fromisoformat(s).timestamp()
+        except (ValueError, TypeError, OSError):
+            return 0.0
+
     def _order_remaining(self, o: dict) -> int:
         """API may return remaining_count (int) or remaining_count_fp (str e.g. '100.00')."""
         r = o.get('remaining_count')
@@ -198,14 +214,49 @@ class FISH_TRADE:
                 pass
         return 0
 
+
+    def _check_duplicate_sell_order(self, open_orders):
+        self.sell_by_ticker.clear()
+        for order in open_orders:
+            if order.get('action') == 'sell' and order.get('status') == 'resting' and self._order_remaining(order) > 0:
+                if order['ticker'] not in self.sell_by_ticker:
+                    self.sell_by_ticker[order['ticker']] = order
+                else:
+                    prev = self.sell_by_ticker[order["ticker"]]
+                    oid_o = order.get("order_id")
+                    oid_p = prev.get("order_id")
+                    if oid_o and oid_o == oid_p:
+                        self.log(
+                            f"{self.get_datetime()} [WARN] {order['ticker']} duplicate sell listing same order_id={oid_o} (API duplicate row), skip cancel"
+                        )
+                        self.sell_by_ticker[order["ticker"]] = order
+                        continue
+                    ts_o = self._order_created_timestamp(order)
+                    ts_p = self._order_created_timestamp(prev)
+                    # Always cancel the oldest resting sell; keep the newer one.
+                    if ts_o < ts_p:
+                        oldest_id, keep = oid_o, prev
+                    elif ts_p < ts_o:
+                        oldest_id, keep = oid_p, order
+                    else:
+                        oldest_id, keep = oid_p, order
+                    self.log(
+                        f"{self.get_datetime()} [WARN] {order['ticker']} duplicate sell orders — cancelling oldest {oldest_id} (keep {keep.get('order_id')})"
+                    )
+                    self._cancel_order_safe(oldest_id, order["ticker"])
+                    self.sell_by_ticker[order["ticker"]] = keep
+
     def get_open_orders(self):
         open_orders = self.client.get_open_orders()['orders']
+        self._check_duplicate_sell_order(open_orders)
         # Tickers with resting buy orders on API (not filled)
         resting_buy_tickers = {
             o['ticker'] for o in open_orders
             if o.get('action') == 'buy' and o.get('status') == 'resting' and self._order_remaining(o) > 0
         }
-        # Resting sell orders: ticker -> (order_id, remaining_count)
+        # Resting sell orders: ticker -> (primary_order_id, sum of remaining_count).
+        # Multiple sells per ticker must be aggregated; a dict keyed by ticker alone drops duplicates
+        # and made the bot think 10+10 resting was only 10 vs a 10 position ("OK SELL") while 20 were offered.
         api_resting_sells = {
             o['ticker']: (o.get('order_id'), self._order_remaining(o))
             for o in open_orders
@@ -244,6 +295,7 @@ class FISH_TRADE:
 
     def check_over_sell(self):
         open_orders = self.client.get_open_orders()['orders']
+        self._check_duplicate_sell_order(open_orders)
         open_positions = self.client.get_positions()['market_positions']
         open_positions_qty = {}
         for p in open_positions:
@@ -255,6 +307,7 @@ class FISH_TRADE:
                 except (ValueError, TypeError):
                     pos = 0
             open_positions_qty[ticker] = pos
+        # All resting sells per ticker (do not collapse to one dict entry per ticker).
         open_sell_orders = {o['ticker']: o for o in open_orders if o.get('action') == 'sell' and o.get('status') == 'resting'}
         for ticker, order in open_sell_orders.items():
             rem = self._order_remaining(order)
@@ -325,6 +378,8 @@ class FISH_TRADE:
         self.orders_manager.create_fish_sell_order(actual_positions=actual_positions or None)
         open_sell_orders = self.orders_manager.get_open_sell_orders()
         for ticker, order in list(open_sell_orders.items()):
+            if "BTC" in ticker:
+                continue
             # CRITICAL: We only ever sell YES (close long YES). NEVER sell NO (would go short).
             sell_side = 'yes'
             assert order.side == 'yes', f"BLOCKED: sell order for {ticker} side={order.side} - would go short"
@@ -456,7 +511,8 @@ class FISH_TRADE:
                 existing = self.orders_manager.open_buy_orders.get(ticker) or self.orders_manager.open_sell_orders.get(ticker)
                 if existing and existing.order_id:
                     self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - already have open buy order_id={existing.order_id} remaining={existing.remaining_quantity}")
-                    existing.trade_type = log_label
+                    if existing.trade_type != 'fish_order':
+                        existing.trade_type = log_label
                     continue
                 price = fish_ticker_market_orders[ticker]
                 if price is not None:
@@ -517,6 +573,8 @@ class FISH_TRADE:
         self.log(f"{self.get_datetime()} [BUY LOOP] placing up to {n_new} new resting buys on Kalshi API...")
         # Snapshot: place-buy may pop from open_buy_orders on 404/409
         for ticker, order in list(all_open_buy_orders.items()):
+            if "BTC" in ticker:
+                continue
             filled_orders = self.orders_manager.get_filled_orders()
             if ticker in filled_orders:
                 if filled_orders[ticker].action == 'buy':
@@ -642,25 +700,25 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=MDW",
             "https://forecast.weather.gov/MapClick.php?lat=41.7885&lon=-87.7417&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMDW",
-            5,
+            50,
         ],
         "NYC": [
             "https://forecast.weather.gov/product.php?site=OKX&product=CLI&issuedby=NYC",
             "https://forecast.weather.gov/MapClick.php?lat=40.6849&lon=-73.8444&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KNYC",
-            10,
+            5,
         ],
         "AUS": [
             "https://forecast.weather.gov/product.php?site=EWX&product=CLI&issuedby=AUS",
             "https://forecast.weather.gov/MapClick.php?lat=30.1945&lon=-97.6699&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KAUS",
-            50,
+            10,
         ],
         "LAX": [
             "https://forecast.weather.gov/product.php?site=LOX&product=CLI&issuedby=LAX",
             "https://forecast.weather.gov/MapClick.php?lat=33.9435&lon=-118.4086&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KLAX",
-            150,
+            50,
         ],
         "MIA": [
             "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MIA",
@@ -672,13 +730,13 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=BOU&product=CLI&issuedby=DEN",
             "https://forecast.weather.gov/MapClick.php?lat=39.8482&lon=-104.6738&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KDEN",
-            10,
+            50,
         ],
         "TOKC": [
             "https://forecast.weather.gov/product.php?site=OUN&product=CLI&issuedby=OKC",
             "https://forecast.weather.gov/MapClick.php?lat=35.3931&lon=-97.6009&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KOKC",
-            10,
+            100,
         ],
         "TATL": [
             "https://forecast.weather.gov/product.php?site=FFC&product=CLI&issuedby=ATL",
@@ -702,7 +760,7 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=CRP&product=CLI&issuedby=SAT",
             "https://forecast.weather.gov/MapClick.php?lat=29.5338&lon=-98.47&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSAT",
-            10,
+            100,
         ],
         "TDAL": [
             "https://forecast.weather.gov/product.php?site=FWD&product=CLI&issuedby=DFW",
@@ -714,13 +772,13 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=MTR&product=CLI&issuedby=SFO",
             "https://forecast.weather.gov/MapClick.php?lat=37.7801&lon=-122.4202&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSFO",
-            150,
+            50,
         ],
         "TSEA": [
             "https://forecast.weather.gov/product.php?site=SEW&product=CLI&issuedby=SEA",
             "https://forecast.weather.gov/MapClick.php?lat=47.4479&lon=-122.3088&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSEA",
-            10,
+            50,
         ],
         "THOU": [
             "https://forecast.weather.gov/product.php?site=OUN&product=CLI&issuedby=HOU",
@@ -732,7 +790,7 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=PVD&product=CLI&issuedby=BOS",
             "https://forecast.weather.gov/MapClick.php?lat=42.359&lon=-71.0586&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KBOS",
-            50,
+            10,
         ],
         "TLV": [
             "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=LAS",
@@ -745,6 +803,12 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/MapClick.php?lat=44.882&lon=-93.2218&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMSP",
             2,
+        ],
+        "TDC": [
+            "https://forecast.weather.gov/product.php?site=LWX&product=CLI&issuedby=DCA",
+            "https://forecast.weather.gov/MapClick.php?lat=38.892&lon=-77.0199&FcstType=digitalDWML",
+            "https://www.weather.gov/wrh/timeseries?site=KDCA",
+            50,
         ],
     }
 

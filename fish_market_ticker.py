@@ -284,14 +284,12 @@ class FISH_MARKET_TICKER:
     def ticker_to_symbol(self, ticker: str) -> str:
 
         ticker_upper = ticker.upper()
-        
-        # Remove KXHIGH or KXLOWT prefix
-        if ticker_upper.startswith("KXHIGH"):
-            city_part = ticker_upper[6:]  # Remove "KXHIGH" (6 chars)
-        elif ticker_upper.startswith("KXLOWT"):
-            city_part = ticker_upper[6:]  # Remove "KXLOWT" (6 chars)
+        # KXHIGHT* starts with KXHIGH: strip 6 chars so city is TBOS, TATL, … (matches Excel / fish_pnl city column).
+        if ticker_upper.startswith("KXLOWT"):
+            city_part = ticker_upper[6:]
+        elif ticker_upper.startswith("KXHIGH"):
+            city_part = ticker_upper[6:]
         else:
-            # If it doesn't match expected format, try to extract anyway
             city_part = ticker_upper
         
         # Extract city code (everything before the first "-")

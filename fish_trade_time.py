@@ -48,13 +48,13 @@ class FISH_TRADE_TIME:
     TMR_HIGH_CLOSE_HOURS = (23, 30, 50)
 
     # --- Next day: today high ---
-    TODAY_HIGH_START_HOUR = 7
+    TODAY_HIGH_START_HOUR = 8
     TODAY_HIGH_CLOSE_HOURS = (10, 11, 12)
     TODAY_HIGH_STOP_HOUR = 9            # 9AM: cancel remaining unfilled buy orders
 
     # --- Fish incentive ---
     FISH_INCENTIVE_START_HOUR = 10
-    FISH_INCENTIVE_STOP_HOUR = 17
+    FISH_INCENTIVE_STOP_HOUR = 16
 
     # One-shot flags (reset when date rolls)
     __START_TODAY_LOW = False
