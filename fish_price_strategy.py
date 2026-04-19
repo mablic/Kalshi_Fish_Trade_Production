@@ -16,7 +16,8 @@ class FISH_PRICE_STRATEGY:
 
     __VOLUME_THRESHOLD = 100
     __MIN_PRICE = 0.01
-    __MIN_ENTRY_PRICE = 0.03  # Do not open a buy if strategy price would be below this
+    __MIN_ENTRY_PRICE = 0.03
+    __MAX_ENTRY_PRICE = 0.15
 
     def __init__(self,
         entry_price: float = None,
@@ -92,7 +93,7 @@ class FISH_PRICE_STRATEGY:
         """
         Find buy price for a RESTING order (maker).
         Best YES ask = 1 - max(no_dollars). Our bid must be < best_yes_ask to rest.
-        Pick lowest price <= 0.1 and > 0.01 with cumulative volume >= threshold.
+        Pick lowest price <= 0.15 and > 0.01 with cumulative volume >= threshold.
         """
         yes_book = market_book.get('yes_dollars', market_book.get('yes', []))
         no_book = market_book.get('no_dollars', market_book.get('no', []))
@@ -134,24 +135,24 @@ class FISH_PRICE_STRATEGY:
         result_price = None
         for p, v in entries:
             cum += v
-            if 0.01 < p <= 0.1 and cum >= self.__VOLUME_THRESHOLD:
+            if 0.01 < p <= self.__MAX_ENTRY_PRICE and cum >= self.__VOLUME_THRESHOLD:
                 if best_yes_ask is None or p < best_yes_ask:
                     result_price = p
                     break
-            elif p > 0.1:
+            elif p > self.__MAX_ENTRY_PRICE:
                 if best_yes_ask is None or p < best_yes_ask:
-                    result_price = 0.1
+                    result_price = self.__MAX_ENTRY_PRICE
                     break
 
         if result_price is not None:
             p = round(result_price, 4)
             return p if p >= self.__MIN_ENTRY_PRICE else None
         for p, v in sorted(entries, key=lambda x: x[0]):
-            if p > 0.01 and p <= 0.1 and v >= self.__VOLUME_THRESHOLD:
+            if p > 0.01 and p <= self.__MAX_ENTRY_PRICE and v >= self.__VOLUME_THRESHOLD:
                 if best_yes_ask is None or p < best_yes_ask:
                     r = round(p, 4)
                     return r if r >= self.__MIN_ENTRY_PRICE else None
-        above = [p for p, _ in entries if 0.01 < p <= 0.1 and (best_yes_ask is None or p < best_yes_ask)]
+        above = [p for p, _ in entries if 0.01 < p <= self.__MAX_ENTRY_PRICE and (best_yes_ask is None or p < best_yes_ask)]
         if not above:
             return None
         r = round(min(above), 4)

@@ -21,16 +21,16 @@ from cryptography.hazmat.primitives import serialization
 
 TRADE_SIZE = 100
 VOLUME_THRESHOLD = 100
-FISH_INCENTIVE_THRESHOLD = 0.02
+FISH_INCENTIVE_THRESHOLD = 0.03
 FISH_INCENTIVE_VOLUME_THRESHOLD = 300
-FISH_INCENTIVE_TRADE_SIZE = 200
+FISH_INCENTIVE_TRADE_SIZE = 150
 
 class FISH_TRADE:
     # Resolve log path from this file so it works regardless of cwd
     _base_dir = os.path.dirname(os.path.abspath(__file__))
     log_file = os.path.join(_base_dir, "logs", "fish_trade.log")
 
-    def __init__(self, client: KalshiHttpClient, site_dict: dict, test_mode: bool = False,
+    def __init__(self, client: KalshiHttpClient, site_dict: dict, bypass_ticker_list: list, test_mode: bool = False,
                  test_client=None, test_parse_weather=None, test_market_ticker=None, test_trade_time=None):
         self.test_mode = test_mode
         self.incentive = FISH_INCENTIVE()
@@ -45,6 +45,7 @@ class FISH_TRADE:
         self.orders_manager.fish_order_quantity = TRADE_SIZE
         self.fish_incentive = FISH_INCENTIVE(fish_incentive_threshold=FISH_INCENTIVE_THRESHOLD, fish_incentive_volume_threshold=FISH_INCENTIVE_VOLUME_THRESHOLD)
         self.sell_by_ticker = defaultdict()
+        self.bypass_ticker_list = bypass_ticker_list
 
     def get_datetime(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -85,12 +86,12 @@ class FISH_TRADE:
                 old_price = self.orders_manager.open_sell_orders[ticker].price
                 new_price = price_strategy.trade_price
                 if old_price == new_price:
-                    self.log(f"{self.get_datetime()} [SKIP SELL] {ticker} stage={stage} {old_price} -> {new_price} (no change)")
+                    self.log(f"{self.get_datetime()} [SKIP SELL] {ticker} trade_type={getattr(order, 'trade_type', '')} stage={stage} {old_price} -> {new_price} (no change)")
                     return
                 self.orders_manager.open_sell_orders[ticker].price = new_price
                 self.orders_manager.open_sell_orders[ticker].order_execution_type = 'update'
                 self.orders_manager.open_sell_orders[ticker].last_updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                self.log(f"{self.get_datetime()} [UPDATE SELL] {ticker} stage={stage} {old_price} -> {new_price} (will cancel+replace on API)")
+                self.log(f"{self.get_datetime()} [UPDATE SELL] {ticker} trade_type={getattr(order, 'trade_type', '')} stage={stage} {old_price} -> {new_price} (will cancel+replace on API)")
         except Exception as e:
             self.log(f"{self.get_datetime()} [ERROR] Failed to update sell order price strategy for ticker {ticker}: {str(e)}")
 
@@ -110,19 +111,19 @@ class FISH_TRADE:
         for ticker, order in list(self.orders_manager.get_open_buy_orders().items()):
             should_cancel = False
             if self.trade_time.is_today_low_stop_trade_time() and self.market_ticker.is_today_low_ticker(order.ticker):
-                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (today low stop)")
+                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} trade_type={order.trade_type} qty={order.remaining_quantity} (today low stop)")
                 should_cancel = True
             elif self.trade_time.is_today_high_stop_trade_time() and self.market_ticker.is_today_high_ticker(order.ticker):
-                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (today high stop)")
+                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} trade_type={order.trade_type} qty={order.remaining_quantity} (today high stop)")
                 should_cancel = True
             elif self.trade_time.is_tomorrow_low_stop_trade_time() and self.market_ticker.is_tomorrow_low_ticker(order.ticker):
-                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (tomorrow low stop)")
+                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} trade_type={order.trade_type} qty={order.remaining_quantity} (tomorrow low stop)")
                 should_cancel = True
             elif self.trade_time.is_tomorrow_high_stop_trade_time() and self.market_ticker.is_tomorrow_high_ticker(order.ticker):
-                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} qty={order.remaining_quantity} (tomorrow high stop)")
+                self.log(f"{self.get_datetime()} [CANCEL OPEN BUY] {order.ticker} trade_type={order.trade_type} qty={order.remaining_quantity} (tomorrow high stop)")
                 should_cancel = True
             elif self.trade_time.is_fish_incentive_stop_trade_time() and order.trade_type == 'incentive_trade':
-                self.log(f"{self.get_datetime()} [CANCEL INCENTIVE BUY] {order.ticker} qty={order.remaining_quantity} (fish incentive stop)")
+                self.log(f"{self.get_datetime()} [CANCEL INCENTIVE BUY] {order.ticker} trade_type={order.trade_type} qty={order.remaining_quantity} (fish incentive stop)")
                 should_cancel = True
             if should_cancel:
                 self._cancel_order_safe(order.order_id, order.ticker)
@@ -313,12 +314,15 @@ class FISH_TRADE:
             rem = self._order_remaining(order)
             if rem > open_positions_qty.get(ticker, 0):
                 if open_positions_qty.get(ticker, 0) > 0:
-                    self.log(f"{self.get_datetime()} [OVER SELL] {ticker} qty={rem} > {open_positions_qty.get(ticker, 0)} - cancelling order")
+                    managed_os = self.orders_manager.open_sell_orders.get(ticker)
+                    tt = getattr(managed_os, "trade_type", "") if managed_os else ""
+                    self.log(f"{self.get_datetime()} [OVER SELL] {ticker} trade_type={tt} qty={rem} > {open_positions_qty.get(ticker, 0)} - cancelling order")
                     self._cancel_order_safe(order.get('order_id'), ticker)
-                    self.orders_manager.open_sell_orders[ticker].remaining_quantity = open_positions_qty.get(ticker, 0)
-                    self.orders_manager.open_sell_orders[ticker].order_execution_type = 'update'
-                    self.orders_manager.open_sell_orders[ticker].last_updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    self.log(f"{self.get_datetime()} [UPDATE OVER SELL] {ticker} qty={rem} -> {open_positions_qty.get(ticker, 0)} (cancel+replace applied on API)")
+                    if managed_os:
+                        managed_os.remaining_quantity = open_positions_qty.get(ticker, 0)
+                        managed_os.order_execution_type = "update"
+                        managed_os.last_updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.log(f"{self.get_datetime()} [UPDATE OVER SELL] {ticker} trade_type={tt} qty={rem} -> {open_positions_qty.get(ticker, 0)} (cancel+replace applied on API)")
                     sell_side = 'yes'
                     sell_qty = open_positions_qty.get(ticker, 0)
                     # order is from API (dict); price in yes_price_dollars or no_price_dollars
@@ -335,16 +339,23 @@ class FISH_TRADE:
                             if managed:
                                 managed.order_id = response['order'].get('order_id', '')
                                 managed.order_execution_type = 'pending'
-                            self.log(f"{self.get_datetime()} [CREATE SELL] {ticker} side={sell_side} qty={sell_qty} @ {yes_price} (filled buy position)")
+                            tt = getattr(managed, "trade_type", "") if managed else ""
+                            self.log(f"{self.get_datetime()} [CREATE SELL] {ticker} trade_type={tt} side={sell_side} qty={sell_qty} @ {yes_price} (filled buy position)")
                     except Exception as e:
                         self.log(f"{self.get_datetime()} [ERROR] Failed to place sell order {ticker}: {e}")
                 else:
-                    self.log(f"{self.get_datetime()} [OVER SELL] {ticker} qty={rem} > {open_positions_qty.get(ticker, 0)} - cancelling order")
+                    managed_os = self.orders_manager.open_sell_orders.get(ticker)
+                    tt = getattr(managed_os, "trade_type", "") if managed_os else ""
+                    self.log(f"{self.get_datetime()} [OVER SELL] {ticker} trade_type={tt} qty={rem} > {open_positions_qty.get(ticker, 0)} - cancelling order")
                     self._cancel_order_safe(order.get('order_id'), ticker)
-                    self.orders_manager.open_sell_orders[ticker].remaining_quantity = 0
+                    managed_os = self.orders_manager.open_sell_orders.get(ticker)
+                    if managed_os:
+                        managed_os.remaining_quantity = 0
                     self.orders_manager.open_sell_orders.pop(ticker, None)
             else:
-                self.log(f"{self.get_datetime()} [OK SELL] {ticker} qty={rem} <= {open_positions_qty.get(ticker, 0)} - keeping order")
+                managed_os = self.orders_manager.open_sell_orders.get(ticker)
+                tt = getattr(managed_os, "trade_type", "") if managed_os else ""
+                self.log(f"{self.get_datetime()} [OK SELL] {ticker} trade_type={tt} qty={rem} <= {open_positions_qty.get(ticker, 0)} - keeping order")
 
     def create_fish_sell_order(self):
         # Fetch actual positions - only create sells for tickers where we have position > 0
@@ -353,7 +364,12 @@ class FISH_TRADE:
         try:
             resp = self.client.get_positions()
             for p in resp.get("market_positions", []):
-                ticker = p.get("ticker")
+                ticker = p.get("ticker") or ""
+                if self.bypass_ticker_list and any(
+                    bypass in ticker for bypass in self.bypass_ticker_list
+                ):
+                    self.log(f"{self.get_datetime()} [SKIP SELL] {ticker} trade_type=n/a - bypass ticker")
+                    continue
                 pos = p.get("position")
                 if pos is None and p.get("position_fp") is not None:
                     try:
@@ -372,7 +388,7 @@ class FISH_TRADE:
         if actual_positions:
             for ticker, order in list(self.orders_manager.get_open_sell_orders().items()):
                 if actual_positions.get(ticker, 0) <= 0 and order.order_id:
-                    self.log(f"{self.get_datetime()} [CANCEL ORPHAN] {ticker} - no position, cancelling stale sell order")
+                    self.log(f"{self.get_datetime()} [CANCEL ORPHAN] {ticker} trade_type={order.trade_type} - no position, cancelling stale sell order")
                     self._cancel_order_safe(order.order_id, ticker)
 
         self.orders_manager.create_fish_sell_order(actual_positions=actual_positions or None)
@@ -390,7 +406,7 @@ class FISH_TRADE:
                 order.remaining_quantity = actual_pos
             sell_qty = min(order.remaining_quantity, actual_pos)
             if sell_qty <= 0:
-                self.log(f"{self.get_datetime()} [SKIP SELL] {ticker} position={actual_pos} qty=0 - not placing sell (prevents oversell)")
+                self.log(f"{self.get_datetime()} [SKIP SELL] {ticker} trade_type={order.trade_type} position={actual_pos} qty=0 - not placing sell (prevents oversell)")
                 if order.order_id:
                     self._cancel_order_safe(order.order_id, ticker)
                     self.orders_manager.open_sell_orders.pop(ticker, None)
@@ -412,7 +428,7 @@ class FISH_TRADE:
                     if response and 'order' in response:
                         order.order_id = response['order'].get('order_id', '')
                         order.order_execution_type = 'pending'
-                    self.log(f"{self.get_datetime()} [CREATE SELL] {ticker} side={sell_side} qty={sell_qty} @ {order.price} (filled buy position)")
+                    self.log(f"{self.get_datetime()} [CREATE SELL] {ticker} trade_type={order.trade_type} side={sell_side} qty={sell_qty} @ {order.price} (filled buy position)")
                 except Exception as e:
                     self.log(f"{self.get_datetime()} [ERROR] Failed to place sell order {ticker}: {e}")
             elif order.order_execution_type == 'update':
@@ -426,7 +442,7 @@ class FISH_TRADE:
                     if response and 'order' in response:
                         order.order_id = response['order'].get('order_id', '')
                         order.order_execution_type = 'pending'
-                        self.log(f"{self.get_datetime()} [UPDATE SELL] {ticker} side={sell_side} qty={sell_qty} @ {order.price} (cancel+replace applied on API)")
+                        self.log(f"{self.get_datetime()} [UPDATE SELL] {ticker} trade_type={order.trade_type} side={sell_side} qty={sell_qty} @ {order.price} (cancel+replace applied on API)")
                     else:
                         self.log(f"{self.get_datetime()} [WARNING] Price adjustment for {ticker} not applied on API: create_open_order returned no order")
                         # Cancel likely succeeded; remove stale open_sell so next cycle we reconcile with actual position
@@ -460,8 +476,8 @@ class FISH_TRADE:
             try:
                 # Skip if we already have an open buy order for this ticker (e.g. from before restart)
                 existing = self.orders_manager.open_buy_orders.get(ticker)
-                if existing and existing.order_id:
-                    self.log(f"{self.get_datetime()} [SKIP {log_label}] {city} {ticker} - already have open buy order_id={existing.order_id} remaining={existing.remaining_quantity}")
+                if existing:
+                    self.log(f"{self.get_datetime()} [SKIP {log_label}] {city} {ticker} trade_type={existing.trade_type} order_id={existing.order_id} remaining={existing.remaining_quantity}")
                     continue
                 resp = self.client.get_market_ticker_order_book(ticker)
                 market_book = resp.get('orderbook_fp') or resp.get('orderbook')
@@ -472,9 +488,10 @@ class FISH_TRADE:
                 price = price_strategy.get_buy_price_strategy(market_book)
                 if price is not None:
                     site_list = self.site_dict.get(city, [])
-                    quantity = site_list[3] if len(site_list) > 3 else 100
+                    is_tmr_ticker = self.market_ticker.is_tomorrow_low_ticker(ticker) or self.market_ticker.is_tomorrow_high_ticker(ticker)
+                    quantity = site_list[4] if is_tmr_ticker else site_list[3]
                     self.orders_manager.create_fish_buy_order(ticker, price, quantity=quantity)
-                    self.log(f"{self.get_datetime()} [CREATE {log_label}] {city} {ticker} qty={quantity} @ {price}")
+                    self.log(f"{self.get_datetime()} [CREATE {log_label}] {city} {ticker} trade_type=fish_order qty={quantity} @ {price}")
                 else:
                     self.log(f"{self.get_datetime()} [SKIP {log_label}] {city} {ticker} - no resting buy price (best ask <= 0.01, would be taker)")
             except Exception as e:
@@ -483,7 +500,7 @@ class FISH_TRADE:
 
     def create_fish_incentive_program(self):
         incentive_response = self.client.get_market_incentive()
-        self.fish_incentive.load_from_incentive_programs(incentive_response)
+        self.fish_incentive.load_from_incentive_programs(incentive_response, self.bypass_ticker_list)
         incentive_tickers = list(self.fish_incentive.get_fish_incentive_tickers())
         n_inc = len(incentive_tickers)
         self.log(f"{self.get_datetime()} [INCENTIVE] scanning {n_inc} weather incentive tickers (order book each)...")
@@ -510,7 +527,7 @@ class FISH_TRADE:
                 # Skip if we already have an open buy order for this ticker (e.g. from before restart)
                 existing = self.orders_manager.open_buy_orders.get(ticker) or self.orders_manager.open_sell_orders.get(ticker)
                 if existing and existing.order_id:
-                    self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - already have open buy order_id={existing.order_id} remaining={existing.remaining_quantity}")
+                    self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} trade_type={existing.trade_type} order_id={existing.order_id} remaining={existing.remaining_quantity}")
                     if existing.trade_type != 'fish_order':
                         existing.trade_type = log_label
                     continue
@@ -518,7 +535,7 @@ class FISH_TRADE:
                 if price is not None:
                     quantity = FISH_INCENTIVE_TRADE_SIZE
                     self.orders_manager.create_fish_buy_order(ticker, price, quantity=quantity, trade_type=log_label)
-                    self.log(f"{self.get_datetime()} [CREATE {log_label}] {ticker} qty={quantity} @ {price}")
+                    self.log(f"{self.get_datetime()} [CREATE {log_label}] {ticker} trade_type={log_label} qty={quantity} @ {price}")
                 else:
                     self.log(f"{self.get_datetime()} [SKIP {log_label}] {ticker} - no resting buy price (best ask <= 0.01, would be taker)")
             except Exception as e:
@@ -578,11 +595,11 @@ class FISH_TRADE:
             filled_orders = self.orders_manager.get_filled_orders()
             if ticker in filled_orders:
                 if filled_orders[ticker].action == 'buy':
-                    self.log(f"{self.get_datetime()} [SKIP BUY] {ticker} - already filled")
+                    self.log(f"{self.get_datetime()} [SKIP BUY] {ticker} trade_type={filled_orders[ticker].trade_type} - already filled")
                     continue
                 else:
                     if filled_orders[ticker].remaining_quantity > 0:
-                        self.log(f"{self.get_datetime()} [SKIP BUY] {ticker} - already partially filled")
+                        self.log(f"{self.get_datetime()} [SKIP BUY] {ticker} trade_type={filled_orders[ticker].trade_type} - already partially filled")
                         continue
             if order.order_execution_type != 'new':
                 continue
@@ -593,7 +610,7 @@ class FISH_TRADE:
                     order.order_id = order_id
                     order.order_execution_type = 'pending'
                     self.orders_manager.record_placed_order_id(order_id)
-                    self.log(f"{self.get_datetime()} [PLACE BUY] {ticker} qty={order.quantity} @ {order.price} order_id={order_id}")
+                    self.log(f"{self.get_datetime()} [PLACE BUY] {ticker} trade_type={order.trade_type} qty={order.quantity} @ {order.price} order_type={order.order_type} order_id={order_id}")
             except HTTPError as e:
                 code = e.response.status_code if e.response is not None else None
                 self.log(f"{self.get_datetime()} [ERROR] Failed to place buy order {ticker}: {e}")
@@ -601,7 +618,7 @@ class FISH_TRADE:
                 if code in (404, 409):
                     self.orders_manager.open_buy_orders.pop(ticker, None)
                     self.orders_manager.fish_orders.pop(ticker, None)
-                    self.log(f"{self.get_datetime()} [REMOVE STALE BUY] {ticker} removed from open_buy_orders (HTTP {code})")
+                    self.log(f"{self.get_datetime()} [REMOVE STALE BUY] {ticker} trade_type={order.trade_type} removed from open_buy_orders (HTTP {code})")
             except Exception as e:
                 self.log(f"{self.get_datetime()} [ERROR] Failed to place buy order {ticker}: {e}")
         self.log(f"{self.get_datetime()} [BUY LOOP] done")
@@ -694,123 +711,148 @@ if __name__ == "__main__":
             "https://forecast.weather.gov/product.php?site=PHI&product=CLI&issuedby=PHL",
             "https://forecast.weather.gov/MapClick.php?lat=39.8764&lon=-75.2422&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KPHL",
+            1,
             5,
         ],
         "CHI": [
             "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=MDW",
             "https://forecast.weather.gov/MapClick.php?lat=41.7885&lon=-87.7417&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMDW",
+            1,
             50,
         ],
         "NYC": [
             "https://forecast.weather.gov/product.php?site=OKX&product=CLI&issuedby=NYC",
             "https://forecast.weather.gov/MapClick.php?lat=40.6849&lon=-73.8444&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KNYC",
-            5,
+            1,
+            1,
         ],
         "AUS": [
             "https://forecast.weather.gov/product.php?site=EWX&product=CLI&issuedby=AUS",
             "https://forecast.weather.gov/MapClick.php?lat=30.1945&lon=-97.6699&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KAUS",
+            1,
             10,
         ],
         "LAX": [
             "https://forecast.weather.gov/product.php?site=LOX&product=CLI&issuedby=LAX",
             "https://forecast.weather.gov/MapClick.php?lat=33.9435&lon=-118.4086&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KLAX",
-            50,
+            1,
+            10,
         ],
         "MIA": [
             "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MIA",
             "https://forecast.weather.gov/MapClick.php?lat=25.795&lon=-80.2798&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMIA",
+            1,
             50,
         ],
         "DEN": [
             "https://forecast.weather.gov/product.php?site=BOU&product=CLI&issuedby=DEN",
             "https://forecast.weather.gov/MapClick.php?lat=39.8482&lon=-104.6738&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KDEN",
-            50,
+            1,
+            1,
         ],
         "TOKC": [
             "https://forecast.weather.gov/product.php?site=OUN&product=CLI&issuedby=OKC",
             "https://forecast.weather.gov/MapClick.php?lat=35.3931&lon=-97.6009&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KOKC",
-            100,
+            1,
+            1,
         ],
         "TATL": [
             "https://forecast.weather.gov/product.php?site=FFC&product=CLI&issuedby=ATL",
             "https://forecast.weather.gov/MapClick.php?lat=33.7485&lon=-84.3915&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KATL",
-            5,
+            1,
+            1,
         ],
         "TNOLA": [
             "https://forecast.weather.gov/product.php?site=LIX&product=CLI&issuedby=MSY",
             "https://forecast.weather.gov/MapClick.php?lat=29.9933&lon=-90.259&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMSY",
+            1,
             10,
         ],
         "TPHX": [
             "https://forecast.weather.gov/product.php?site=TUC&product=CLI&issuedby=PHX",
             "https://forecast.weather.gov/MapClick.php?lat=33.4355&lon=-111.998&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KPHX",
-            100,
+            1,
+            10,
         ],
         "TSATX": [
             "https://forecast.weather.gov/product.php?site=CRP&product=CLI&issuedby=SAT",
             "https://forecast.weather.gov/MapClick.php?lat=29.5338&lon=-98.47&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSAT",
-            100,
+            1,
+            10,
         ],
         "TDAL": [
             "https://forecast.weather.gov/product.php?site=FWD&product=CLI&issuedby=DFW",
             "https://forecast.weather.gov/MapClick.php?lat=32.8975&lon=-97.0444&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KDFW",
+            1,
             10,
         ],
         "TSFO": [
             "https://forecast.weather.gov/product.php?site=MTR&product=CLI&issuedby=SFO",
             "https://forecast.weather.gov/MapClick.php?lat=37.7801&lon=-122.4202&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSFO",
-            50,
+            1,
+            5,
         ],
         "TSEA": [
             "https://forecast.weather.gov/product.php?site=SEW&product=CLI&issuedby=SEA",
             "https://forecast.weather.gov/MapClick.php?lat=47.4479&lon=-122.3088&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KSEA",
-            50,
+            1,
+            10,
         ],
         "THOU": [
             "https://forecast.weather.gov/product.php?site=OUN&product=CLI&issuedby=HOU",
             "https://forecast.weather.gov/MapClick.php?lat=29.7608&lon=-95.3695&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KHOU",
-            50,
+            1,
+            1,
         ],
-        "TBOS": [
-            "https://forecast.weather.gov/product.php?site=PVD&product=CLI&issuedby=BOS",
-            "https://forecast.weather.gov/MapClick.php?lat=42.359&lon=-71.0586&FcstType=digitalDWML",
-            "https://www.weather.gov/wrh/timeseries?site=KBOS",
-            10,
-        ],
+        # "TBOS": [
+        #     "https://forecast.weather.gov/product.php?site=PVD&product=CLI&issuedby=BOS",
+        #     "https://forecast.weather.gov/MapClick.php?lat=42.359&lon=-71.0586&FcstType=digitalDWML",
+        #     "https://www.weather.gov/wrh/timeseries?site=KBOS",
+        #     1,
+        #     5,
+        # ],
         "TLV": [
             "https://forecast.weather.gov/product.php?site=LOT&product=CLI&issuedby=LAS",
             "https://forecast.weather.gov/MapClick.php?lat=36.11478&lon=-115.1728&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KLAS",
-            10,
+            1,
+            2,
         ],
         "TMSP": [
             "https://forecast.weather.gov/product.php?site=MFL&product=CLI&issuedby=MSP",
             "https://forecast.weather.gov/MapClick.php?lat=44.882&lon=-93.2218&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KMSP",
-            2,
+            1,
+            1,
         ],
         "TDC": [
             "https://forecast.weather.gov/product.php?site=LWX&product=CLI&issuedby=DCA",
             "https://forecast.weather.gov/MapClick.php?lat=38.892&lon=-77.0199&FcstType=digitalDWML",
             "https://www.weather.gov/wrh/timeseries?site=KDCA",
-            50,
+            10,
+            10,
         ],
     }
 
-    fish_trade = FISH_TRADE(client, site_dict)
+    bypass_ticker_list = [
+        "BOS",
+        "TBOS",
+    ]
+
+    fish_trade = FISH_TRADE(client, site_dict, bypass_ticker_list)
     fish_trade.start_trade()

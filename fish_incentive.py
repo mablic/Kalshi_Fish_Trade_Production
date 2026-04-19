@@ -16,7 +16,7 @@ class FISH_INCENTIVE:
         self.FISH_INCENTIVE_THRESHOLD = fish_incentive_threshold
         self.FISH_INCENTIVE_VOLUME_THRESHOLD = fish_incentive_volume_threshold
 
-    def load_from_incentive_programs(self, incentive_response: dict):
+    def load_from_incentive_programs(self, incentive_response: dict, filter_ticker_list: list = []):
         """
         Take incentive program API response, filter for weather tickers (KXLOW or KXHIGH),
         and store them in self.fish_incentive_dict.
@@ -29,8 +29,11 @@ class FISH_INCENTIVE:
         for incentive in programs:
             ticker = incentive.get('market_ticker') or ''
             ticker_upper = ticker.upper()
-            if ticker_upper.startswith('KXLOW') or ticker_upper.startswith('KXHIGH'):
-                self.fish_incentive_dict[ticker] = incentive
+            for filter_ticker in filter_ticker_list:
+                if filter_ticker in ticker:
+                    continue
+                if ticker_upper.startswith('KXLOW') or ticker_upper.startswith('KXHIGH'):
+                    self.fish_incentive_dict[ticker] = incentive
 
     def load_fish_incentive_dict(self,
         fish_incentive_dict: dict,
@@ -79,16 +82,18 @@ class FISH_INCENTIVE:
         # Reverse by price: highest first (top down)
         entries.sort(key=lambda x: x[0], reverse=True)
 
+        volume_above_003 = sum(qty for p, qty in entries if p >= 0.03)
         volume_above_002 = sum(qty for p, qty in entries if p >= 0.02)
-        volume_above_001 = sum(qty for p, qty in entries if p >= 0.01)
 
-        if volume_above_002 >= self.FISH_INCENTIVE_VOLUME_THRESHOLD:
+        if volume_above_003 >= self.FISH_INCENTIVE_VOLUME_THRESHOLD:
             return  # 300+ above 0.02, do nothing
 
-        if volume_above_002 < self.FISH_INCENTIVE_VOLUME_THRESHOLD:
-            self.fish_ticker_market_orders[ticker] = 0.01
-        else:
+        if volume_above_003 < self.FISH_INCENTIVE_VOLUME_THRESHOLD:
+            self.fish_ticker_market_orders[ticker] = 0.03
+        elif volume_above_002 < self.FISH_INCENTIVE_VOLUME_THRESHOLD:
             self.fish_ticker_market_orders[ticker] = 0.02
+        else:
+            self.fish_ticker_market_orders[ticker] = 0.01
 
 
     def get_fish_ticker_market_orders(self):

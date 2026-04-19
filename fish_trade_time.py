@@ -77,7 +77,8 @@ class FISH_TRADE_TIME:
     def is_today_low_start_trade_time(self) -> bool:
         """Start any time within 0-2AM (before close 2-4AM)."""
         h = self._hour()
-        if h >= self.TODAY_LOW_CLOSE_HOURS[0] or self.__START_TODAY_LOW:
+        if h >= self.TODAY_LOW_STOP_HOUR or self.__START_TODAY_LOW:
+            self.__START_TODAY_LOW = True
             return False
         if h >= self.TODAY_LOW_START_HOUR:
             self.__START_TODAY_LOW = True
@@ -87,7 +88,8 @@ class FISH_TRADE_TIME:
     def is_today_high_start_trade_time(self) -> bool:
         """Start any time within 8AM hour (8:00-8:59, before close 9-11AM)."""
         h = self._hour()
-        if h >= self.TODAY_HIGH_CLOSE_HOURS[0] or self.__START_TODAY_HIGH:
+        if h >= self.TODAY_HIGH_STOP_HOUR or self.__START_TODAY_HIGH:
+            self.__START_TODAY_HIGH = True
             return False
         if h >= self.TODAY_HIGH_START_HOUR:
             self.__START_TODAY_HIGH = True

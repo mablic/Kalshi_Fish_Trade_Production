@@ -257,7 +257,6 @@ class FISH_ORDERS_MANAGER:
                 if not d.get("ticker"):
                     continue
                 order = _order_from_dict(d)
-                order.trade_type = "fish_order"
                 self.filled_orders[order.ticker] = order
                 self.fish_orders[order.ticker] = order
             self.processed_fill_ids = set(data.get("processed_fill_ids", []))
@@ -303,7 +302,17 @@ class FISH_ORDERS_MANAGER:
             return  # Ignore buy fills from orders we didn't place
         if order.fill_id:
             self.processed_fill_ids.add(order.fill_id)
-        order.trade_type = 'fish_order'
+        # Preserve incentive vs fish weather: Kalshi fills don't carry trade_type; copy from our open buy / fish_orders.
+        if order.action == "buy":
+            src = self.open_buy_orders.get(order.ticker) or self.fish_orders.get(order.ticker)
+            order.trade_type = (
+                src.trade_type if src and getattr(src, "trade_type", None) else "fish_order"
+            )
+        else:
+            cur = self.filled_orders.get(order.ticker)
+            order.trade_type = (
+                cur.trade_type if cur and getattr(cur, "trade_type", None) else "fish_order"
+            )
         if order.ticker not in self.filled_orders:
             # always using the "yes"
             if order.side == 'no':
