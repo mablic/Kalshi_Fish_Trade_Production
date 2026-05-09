@@ -144,9 +144,6 @@ KalshiModel/
 ├── fish_incentive.py    # Fish incentive (if used)
 ├── main.py              # Alternative entry point (if used)
 ├── requirements.txt     # Python dependencies
-├── scripts/             # Analysis and backtest scripts
-│   ├── analyze_pnl.py   # PnL from API or CSV
-│   └── weather_winner_past_7days.py # Weather vs Kalshi outcome backtest
 ├── logs/                 # Log files (auto-generated)
 │   ├── trade.log        # Market bot logs
 │   ├── fish_trade.log   # Fish trade logs
