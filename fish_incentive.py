@@ -29,9 +29,9 @@ class FISH_INCENTIVE:
         for incentive in programs:
             ticker = incentive.get('market_ticker') or ''
             ticker_upper = ticker.upper()
-            for filter_ticker in filter_ticker_list:
-                if filter_ticker in ticker:
-                    continue
+            if ticker_upper in filter_ticker_list:
+                continue
+            else:
                 if ticker_upper.startswith('KXLOW') or ticker_upper.startswith('KXHIGH'):
                     self.fish_incentive_dict[ticker] = incentive
 

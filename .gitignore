@@ -1,16 +1,38 @@
 .env
+.env.*
+!.env.example
 .venv
-__pycache__
+venv/
+ENV/
+__pycache__/
+*$py.class
 *.pyc
 *.pyo
 *.pyd
-*.pyw
-*.pyz
-*.pywz
-*.pyzw
-*.pyzwz
-*.pyzwzw
-*.pyzwzwz
+*.py[cod]
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Packaging & test tooling
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter exports
+*-checkpoint.ipynb
+
 fish_pnl.log
 fish_pnl.csv
 fish_open_trade_ticker.json
@@ -20,6 +42,8 @@ logs/
 scripts/
 test/
 debug_sell_no.json
+.ipynb_checkpoints/
 
-PRIVATE_KEY.pem
-PUBLIC_KEY.pem
+
+# Secrets (PEM keys, etc.)
+*.pem

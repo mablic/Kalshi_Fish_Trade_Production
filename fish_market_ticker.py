@@ -47,12 +47,8 @@ class FISH_MARKET_TICKER:
         parts = key_u.split("-")
         dated_event = len(parts) >= 2 and len(parts[1]) >= 7 and parts[1][:2].isdigit()
         if dated_event:
-            return client.get_markets_by_series(
-                event_ticker=key_u, status=status, limit=1000, fetch_all=True
-            )
-        return client.get_markets_by_series(
-            series_ticker=key_u, status=status, limit=1000, fetch_all=True
-        )
+            return client.get_markets_by_series(event_ticker=key_u, status=status)
+        return client.get_markets_by_series(series_ticker=key_u, status=status)
 
     def _get_markets_by_series(self, client, series_ticker: str):
         """

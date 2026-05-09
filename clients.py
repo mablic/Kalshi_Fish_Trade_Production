@@ -24,6 +24,12 @@ from cryptography.exceptions import InvalidSignature
 
 import websockets
 
+# Per-request page size for portfolio `/orders` and `/fills` (Kalshi max per page). Callers always get the
+# full merged list; pagination is internal—no need to pass limit / fetch_all.
+_PORTFOLIO_LIST_PAGE_LIMIT = 1000
+# Same for GET `/markets` when filtering by series_ticker or event_ticker.
+_MARKETS_LIST_PAGE_LIMIT = 1000
+
 class Environment(Enum):
     DEMO = "demo"
     PROD = "prod"
@@ -142,9 +148,25 @@ class KalshiHttpClient(KalshiBaseClient):
             "cursor": next_cursor,
         }
 
-    def get_fills(self) -> Dict[str, Any]:
-        """Retrieves the account fills."""
-        return self.get(self.portfolio_url + '/fills')
+    def get_fills(self, min_ts: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Fetch fills. Paginates internally until the API stops returning ``cursor``.
+        Same contract as ``get_open_orders``: you receive the merged list—no ``limit``/``fetch_all``.
+        """
+        all_fills: list = []
+        next_cursor: Optional[str] = None
+        while True:
+            params: Dict[str, Any] = {"limit": _PORTFOLIO_LIST_PAGE_LIMIT}
+            if min_ts is not None:
+                params["min_ts"] = min_ts
+            if next_cursor:
+                params["cursor"] = next_cursor
+            resp = self.get(self.portfolio_url + "/fills", params=params)
+            all_fills.extend(resp.get("fills") or [])
+            next_cursor = resp.get("cursor")
+            if not next_cursor:
+                break
+        return {"fills": all_fills, "cursor": next_cursor}
 
     def rate_limit(self) -> None:
         """Built-in rate limiter to prevent exceeding API rate limits."""
@@ -236,10 +258,6 @@ class KalshiHttpClient(KalshiBaseClient):
         params = {k: v for k, v in params.items() if v is not None}
         return self.get(self.markets_url + '/trades', params=params)
 
-    def get_fills(self, min_ts: Optional[int] = None):
-        """Retrieves the fills."""
-        return self.get(self.portfolio_url + '/fills?min_ts=' + str(min_ts))
-
     def get_market_incentive(self, status: str = "active") -> Dict[str, Any]:
         """
         Retrieves active incentive programs only.
@@ -258,22 +276,18 @@ class KalshiHttpClient(KalshiBaseClient):
         series_ticker: Optional[str] = None,
         event_ticker: Optional[str] = None,
         status: Optional[str] = None,
-        limit: int = 1000,
-        fetch_all: bool = True,
-    ):
+    ) -> Dict[str, Any]:
         """
-        Get markets from Kalshi GET /markets.
-
-        For a **specific day's weather strikes** (e.g. KXHIGHMIA-26MAR27), pass **event_ticker**,
-        not series_ticker — otherwise the API returns an incomplete list and strikes like B85.5 can be missing.
-
-        Paginates until cursor is empty when fetch_all is True.
+        List markets for a series or event. Paginates internally until the API stops returning ``cursor``.
+        Same idea as ``get_open_orders`` / ``get_fills``: merged ``markets`` list, no ``limit`` / ``fetch_all``.
+        One of ``series_ticker`` or ``event_ticker`` is required (avoids unfiltered whole-exchange listing).
         """
+        if not series_ticker and not event_ticker:
+            raise ValueError("get_markets_by_series requires series_ticker or event_ticker")
         all_markets: list = []
         next_cursor: Optional[str] = None
-        page_limit = min(1000, limit) if limit else 1000
         while True:
-            params: Dict[str, Any] = {"limit": page_limit}
+            params: Dict[str, Any] = {"limit": _MARKETS_LIST_PAGE_LIMIT}
             if event_ticker:
                 params["event_ticker"] = event_ticker.upper()
             elif series_ticker:
@@ -286,7 +300,7 @@ class KalshiHttpClient(KalshiBaseClient):
             chunk = resp.get("markets") or []
             all_markets.extend(chunk)
             next_cursor = resp.get("cursor") or None
-            if not fetch_all or not next_cursor:
+            if not next_cursor:
                 break
         return {"markets": all_markets, "cursor": next_cursor}
 
@@ -295,32 +309,24 @@ class KalshiHttpClient(KalshiBaseClient):
         return self.get(self.markets_url + '/' + ticker + '/orderbook')
 
 
-    def get_open_orders(
-        self,
-        status: Optional[str] = "resting",
-        limit: Optional[int] = 200,
-        cursor: Optional[str] = None,
-        fetch_all: bool = True,
-    ) -> Dict[str, Any]:
+    def get_open_orders(self, status: Optional[str] = "resting") -> Dict[str, Any]:
         """
-        Retrieves orders. Default status='resting' returns only open (resting) orders.
-        API defaults to 100 per page (max 200). If fetch_all is True, paginates until no cursor.
-        See https://docs.kalshi.com/api-reference/orders/get-orders
+        Fetch open orders. Paginates internally until the API stops returning ``cursor``.
+        Same contract as ``get_fills``: you receive the merged list—no ``limit`` / ``fetch_all``.
+        Pass ``status=None`` to omit the filter (whatever the API returns when unset).
         """
-        all_orders = []
-        next_cursor = cursor
-        page_limit = min(200, limit) if limit else 200
+        all_orders: list = []
+        next_cursor: Optional[str] = None
         while True:
-            params = {"limit": page_limit}
+            params: Dict[str, Any] = {"limit": _PORTFOLIO_LIST_PAGE_LIMIT}
             if status is not None:
                 params["status"] = status
             if next_cursor:
                 params["cursor"] = next_cursor
             resp = self.get(self.portfolio_url + '/orders', params=params)
-            orders = resp.get("orders") or []
-            all_orders.extend(orders)
+            all_orders.extend(resp.get("orders") or [])
             next_cursor = resp.get("cursor")
-            if not fetch_all or not next_cursor or (limit and len(all_orders) >= limit):
+            if not next_cursor:
                 break
         return {"orders": all_orders, "cursor": next_cursor}
 

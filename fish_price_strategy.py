@@ -17,7 +17,7 @@ class FISH_PRICE_STRATEGY:
     __VOLUME_THRESHOLD = 100
     __MIN_PRICE = 0.01
     __MIN_ENTRY_PRICE = 0.03
-    __MAX_ENTRY_PRICE = 0.15
+    __MAX_ENTRY_PRICE = 0.13
 
     def __init__(self,
         entry_price: float = None,
@@ -88,6 +88,22 @@ class FISH_PRICE_STRATEGY:
                 except (ValueError, TypeError, IndexError):
                     continue
         return min(results)
+
+
+    def get_best_bid(self, market_book: dict) -> float | None:
+        """Best bid = highest price at which we can buy (top of book for YES)."""
+        order_book = market_book.get('yes_dollars', market_book.get('yes', []))
+        results = [0.01]
+        if order_book:
+            for pe in order_book:
+                try:
+                    p = float(pe[0])
+                    if p > 1:
+                        p = p / 100
+                    results.append(round(float(p), 2))
+                except (ValueError, TypeError, IndexError):
+                    continue
+        return max(results)
 
     def get_buy_price_strategy(self, market_book: dict):
         """

@@ -54,7 +54,8 @@ class FISH_TRADE_TIME:
 
     # --- Fish incentive ---
     FISH_INCENTIVE_START_HOUR = 10
-    FISH_INCENTIVE_STOP_HOUR = 16
+    FISH_INCENTIVE_STOP_HOUR = 18
+    FISH_INCENTIVE_CLOSE_HOUR = 19
 
     # One-shot flags (reset when date rolls)
     __START_TODAY_LOW = False
@@ -188,6 +189,10 @@ class FISH_TRADE_TIME:
     def is_fish_incentive_stop_trade_time(self) -> bool:
         """13PM: stop fish incentive program."""
         return self._hour() >= self.FISH_INCENTIVE_STOP_HOUR
+
+    def is_fish_incentive_close_trade_time(self) -> bool:
+        """19PM: close fish incentive program."""
+        return self._hour() >= self.FISH_INCENTIVE_CLOSE_HOUR
 
     # --- Legacy property names for fish_trade compatibility ---
     @property
